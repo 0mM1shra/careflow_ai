@@ -1,0 +1,26 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# Environment and sensitive credentials
+.env
+*.pem
+*.key
+
+# Local SQLite databases
+*.db
+*.sqlite3
+
+# Evaluation runs and logs
+*.log
+evaluation_results/
+
+# Streamlit config/cache
+.streamlit/
