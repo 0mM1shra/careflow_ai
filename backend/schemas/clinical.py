@@ -108,6 +108,10 @@ class CaseCreateRequest(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     content: str = Field(..., min_length=1, description="Patient message text")
+    source_type: Optional[str] = Field("patient_typed", description="Origin: patient_typed, voice_transcript, ocr_extraction")
+    source_language: Optional[str] = Field(None, description="Source language code")
+    transcription_confidence: Optional[float] = Field(None, description="Confidence if from ASR/OCR")
+    is_confirmed: Optional[bool] = Field(True, description="Whether confirmed by patient")
 
 
 class CaseReviewRequest(BaseModel):

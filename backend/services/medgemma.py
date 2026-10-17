@@ -41,10 +41,15 @@ class MedGemmaService:
             "model_id": self.model_id,
             "has_endpoint": bool(self.endpoint),
             "has_api_key": bool(self.api_key),
+            "masked_key": settings.get_masked_key(self.api_key),
+            "timeout_seconds": settings.MODEL_TIMEOUT_SECONDS,
+            "asr_model_size": settings.ASR_MODEL_SIZE,
+            "ocr_engine": settings.OCR_ENGINE,
+            "hf_home": settings.HF_HOME or "default",
             "is_ready": True if self.mode == "mock" else bool(self.endpoint or self.mode == "local"),
             "memory_guidance": (
                 "Google MedGemma 4B requires ~8 GB RAM in fp16, or ~3.5-4 GB in 4-bit quantization. "
-                "On a 16 GB laptop with no dedicated GPU, CPU execution is possible but may be slow. "
+                "On a 16 GB laptop with an RTX 4050 (6 GB VRAM), 4-bit quantization fits comfortably in VRAM (~3.8 GB). "
                 "For instantaneous hackathon testing and automated evaluation, use 'mock' mode."
             )
         }
@@ -63,11 +68,14 @@ class MedGemmaService:
             text = text[start:end+1]
         return text
 
-    def generate_json(self, system_prompt: str, user_prompt: str, max_retries: int = 1) -> Dict[str, Any]:
+    def generate_json(self, system_prompt: str, user_prompt: str, max_retries: Optional[int] = None) -> Dict[str, Any]:
         """
         Executes inference and strictly parses the returned JSON.
-        Implements a single retry on malformed JSON before raising ModelInferenceError.
+        Implements bounded retries on malformed JSON before raising ModelInferenceError.
         """
+        if max_retries is None:
+            max_retries = settings.MODEL_MAX_RETRIES
+
         prompt = self._build_prompt(system_prompt, user_prompt)
 
         for attempt in range(max_retries + 1):
@@ -137,10 +145,25 @@ class MedGemmaService:
             }
         }
 
+        timeout = settings.MODEL_TIMEOUT_SECONDS
         try:
-            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=60)
-            if resp.status_code != 200:
-                raise ModelInferenceError(f"Hosted inference endpoint returned HTTP {resp.status_code}: {resp.text}")
+            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code == 401:
+                raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN.")
+            elif resp.status_code == 403:
+                raise ModelInferenceError(
+                    f"Access forbidden (HTTP 403) for model '{self.model_id}'. "
+                    f"Ensure you have accepted the model license terms at https://huggingface.co/{self.model_id} "
+                    f"and your token has 'read' permissions."
+                )
+            elif resp.status_code == 404:
+                raise ModelInferenceError(f"Hosted endpoint not found (HTTP 404). Check MEDGEMMA_ENDPOINT URL.")
+            elif resp.status_code == 504:
+                raise ModelInferenceError(f"Hosted endpoint gateway timeout (HTTP 504) after {timeout}s.")
+            elif resp.status_code != 200:
+                # Sanitize error text to prevent token leakage
+                safe_err = resp.text.replace(self.api_key, "***") if self.api_key else resp.text
+                raise ModelInferenceError(f"Hosted inference endpoint returned HTTP {resp.status_code}: {safe_err[:200]}")
             
             data = resp.json()
             if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
@@ -151,8 +174,13 @@ class MedGemmaService:
                 return data["choices"][0]["message"]["content"]
             else:
                 return json.dumps(data)
+        except requests.Timeout:
+            raise ModelInferenceError(f"Hosted MedGemma endpoint timed out after {timeout} seconds.")
         except requests.RequestException as e:
-            raise ModelInferenceError(f"Network error calling MedGemma endpoint: {e}")
+            err_str = str(e)
+            if self.api_key:
+                err_str = err_str.replace(self.api_key, "***")
+            raise ModelInferenceError(f"Network error calling MedGemma endpoint: {err_str}")
 
     def _local_inference(self, prompt: str) -> str:
         """Loads and executes the model locally using Hugging Face Transformers."""
@@ -165,27 +193,48 @@ class MedGemmaService:
                 "Install them or switch MEDGEMMA_MODE=mock or hosted."
             )
 
-        if self._local_pipeline is None:
-            logger.info(f"Loading local MedGemma weights for {self.model_id}...")
-            tokenizer = AutoTokenizer.from_pretrained(self.model_id, token=self.api_key or None)
-            
-            load_kwargs = {"device_map": "auto"}
-            if self.local_quantization == "4bit":
-                try:
-                    from transformers import BitsAndBytesConfig
-                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=torch.float16
-                    )
-                except Exception as e:
-                    logger.warning(f"4-bit quantization setup failed, falling back to default precision: {e}")
+        cache_dir = settings.HF_HOME if settings.HF_HOME else None
 
-            model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                token=self.api_key or None,
-                **load_kwargs
-            )
-            self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
+        if self._local_pipeline is None:
+            logger.info(f"Loading local MedGemma weights for {self.model_id} (cache_dir={cache_dir})...")
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_id,
+                    token=self.api_key or None,
+                    cache_dir=cache_dir
+                )
+
+                load_kwargs = {"device_map": "auto"}
+                if cache_dir:
+                    load_kwargs["cache_dir"] = cache_dir
+
+                if self.local_quantization == "4bit":
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=torch.float16
+                        )
+                    except Exception as e:
+                        logger.warning(f"4-bit quantization setup failed, falling back to default precision: {e}")
+
+                model = AutoModelForCausalLM.from_pretrained(
+                    self.model_id,
+                    token=self.api_key or None,
+                    **load_kwargs
+                )
+                self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
+            except Exception as load_err:
+                err_msg = str(load_err)
+                if self.api_key:
+                    err_msg = err_msg.replace(self.api_key, "***")
+                if "gated" in err_msg.lower() or "403" in err_msg or "unauthorized" in err_msg.lower():
+                    raise ModelInferenceError(
+                        f"Gated model access error for '{self.model_id}'. "
+                        f"Please visit https://huggingface.co/{self.model_id} to accept the license agreement "
+                        f"and ensure your HF_TOKEN is configured in .env."
+                    )
+                raise ModelInferenceError(f"Failed to load local MedGemma model: {err_msg}")
 
         outputs = self._local_pipeline(
             prompt,
@@ -313,12 +362,36 @@ class MedGemmaService:
 
         # Check for explicit denials (negatives)
         denial_patterns = [
-            ("denies chest pain", ["no chest pain", "not having chest pain", "don't have chest pain", "सीने में दर्द नहीं है"]),
-            ("denies fever", ["no fever", "haven't had a fever", "temp is normal", "बुखार नहीं है"]),
-            ("denies shortness of breath", ["no shortness of breath", "breathing is fine", "can breathe normally", "सांस ठीक है"]),
-            ("denies allergies", ["no allergies", "no known allergies", "कोई एलर्जी नहीं"]),
-            ("denies medications", ["not taking any medication", "no regular meds", "no meds", "कोई दवाई नहीं"]),
-            ("denies head injury", ["no head injury", "didn't hit my head", "सिर पर चोट नहीं लगी"])
+            ("denies chest pain", [
+                "no chest pain", "not having chest pain", "don't have chest pain",
+                "सीने में दर्द नहीं है", "सीने में दर्द नहीं", "छाती में दर्द नहीं",
+                "chest pain nahi hai", "chest pain nahi", "seene me dard nahi hai", "seene me dard nahi", "chhati me dard nahi"
+            ]),
+            ("denies fever", [
+                "no fever", "haven't had a fever", "temp is normal",
+                "बुखार नहीं है", "बुखार नहीं",
+                "bukhar nahi hai", "bukhar nahi"
+            ]),
+            ("denies shortness of breath", [
+                "no shortness of breath", "breathing is fine", "can breathe normally",
+                "सांस ठीक है", "सांस लेने में तकलीफ नहीं है", "सांस लेने में कोई दिक्कत नहीं",
+                "saans theek hai", "saans lene me takleef nahi", "saans lene me dikkat nahi hai", "saans lene me koi dikkat nahi"
+            ]),
+            ("denies allergies", [
+                "no allergies", "no known allergies",
+                "कोई एलर्जी नहीं", "कोई एलर्जी नहीं है",
+                "koi allergy nahi hai", "koi allergy nahi"
+            ]),
+            ("denies medications", [
+                "not taking any medication", "no regular meds", "no meds",
+                "कोई दवाई नहीं", "कोई दवा नहीं ले रहा",
+                "koi dawai nahi", "koi dawai nahi le raha", "koi meds nahi"
+            ]),
+            ("denies head injury", [
+                "no head injury", "didn't hit my head",
+                "सिर पर चोट नहीं लगी", "सिर में चोट नहीं",
+                "chot nahi lagi", "head injury nahi hai"
+            ])
         ]
         for canonical, phrases in denial_patterns:
             for phrase in phrases:
@@ -333,7 +406,9 @@ class MedGemmaService:
             r"started\s*(?:about\s*)?(\d+\s*(?:day|days|hour|hours|week|weeks)\s*ago|yesterday|this morning)",
             r"since\s*(yesterday|this morning|last night|\d+\s*(?:days|weeks))",
             r"(\d+\s*(?:दिन|घंटे|महीने|हफ्ते))\s*से",
-            r"कल\s*से|आज\s*सुबह\s*से"
+            r"कल\s*से|आज\s*सुबह\s*से",
+            r"(\d+\s*(?:din|ghante|hafte|mahine))\s*se",
+            r"kal\s*se|aaj\s*subah\s*se"
         ]
         for pat in duration_patterns:
             m = re.search(pat, full_text)
@@ -345,40 +420,56 @@ class MedGemmaService:
         severity_match = re.search(r"(\b[1-9]|10)\s*(?:out of 10|/10)", full_text)
         if severity_match:
             severity = f"{severity_match.group(1)}/10"
-        elif "severe" in full_text or "असहनीय" in full_text or "बहुत तेज" in full_text:
+        elif any(w in full_text for w in ["severe", "असहनीय", "बहुत तेज", "bahut tez", "tez dard", "asahniya"]):
             severity = "Severe"
-        elif "mild" in full_text or "हल्का" in full_text:
+        elif any(w in full_text for w in ["mild", "हल्का", "halka", "kam dard"]):
             severity = "Mild"
-        elif "moderate" in full_text or "मध्यम" in full_text:
+        elif any(w in full_text for w in ["moderate", "मध्यम", "thoda dard"]):
             severity = "Moderate"
 
         # Check progression
-        if any(w in full_text for w in ["worse", "worsening", "getting worse", "बढ़ रहा", "खराब हो रहा"]):
+        if any(w in full_text for w in ["worse", "worsening", "getting worse", "बढ़ रहा", "खराब हो रहा", "badh raha", "kharab ho raha"]):
             progression = "Worsening"
-        elif any(w in full_text for w in ["better", "improving", "सुधार", "कम हो रहा"]):
+        elif any(w in full_text for w in ["better", "improving", "सुधार", "कम हो रहा", "kam ho raha", "sudhar"]):
             progression = "Improving"
-        elif any(w in full_text for w in ["constant", "same", "लगातार", "वैसा ही"]):
+        elif any(w in full_text for w in ["constant", "same", "लगातार", "वैसा ही", "lagataar", "waisa hi"]):
             progression = "Constant"
 
         # Check for unknown / skipped
         for pt in patient_texts:
             pt_low = pt.lower().strip()
-            if any(term in pt_low for term in ["skip", "don't know", "dont know", "not sure", "unknown", "no idea", "पता नहीं", "मालूम नहीं", "छोड़ें"]):
+            if any(term in pt_low for term in ["skip", "don't know", "dont know", "not sure", "unknown", "no idea", "पता नहीं", "मालूम नहीं", "छोड़ें", "pata nahi", "malum nahi", "yaad nahi", "chhoden"]):
                 unknowns.append(f"Patient indicated unknown or skipped: '{pt}'")
 
-        # Check for contradictions across texts
-        if any("no fever" in pt.lower() for pt in patient_texts) and any("fever" in pt.lower() and "no fever" not in pt.lower() for pt in patient_texts):
+        # Check for contradictions across texts (supports multilingual English, Hindi, Hinglish)
+        fever_neg_terms = ["no fever", "बुखार नहीं", "bukhar nahi"]
+        fever_pos_terms = ["fever", "बुखार", "bukhar"]
+        has_fever_neg = any(any(n in pt.lower() for n in fever_neg_terms) for pt in patient_texts)
+        has_fever_pos = any(
+            any(p in pt.lower() for p in fever_pos_terms) and not any(n in pt.lower() for n in fever_neg_terms)
+            for pt in patient_texts
+        )
+        if has_fever_neg and has_fever_pos:
             contradictions.append("Contradiction detected: Patient reported both having and not having fever.")
-        if any("no chest pain" in pt.lower() for pt in patient_texts) and any("chest pain" in pt.lower() and "no chest pain" not in pt.lower() for pt in patient_texts):
+
+        cp_neg_terms = ["no chest pain", "सीने में दर्द नहीं", "chest pain nahi", "seene me dard nahi"]
+        cp_pos_terms = ["chest pain", "सीने में दर्द", "seene me dard", "chhati me dard"]
+        has_cp_neg = any(any(n in pt.lower() for n in cp_neg_terms) for pt in patient_texts)
+        has_cp_pos = any(
+            any(p in pt.lower() for p in cp_pos_terms) and not any(n in pt.lower() for n in cp_neg_terms)
+            for pt in patient_texts
+        )
+        if has_cp_neg and has_cp_pos:
             contradictions.append("Contradiction detected: Patient reported both having and not having chest pain.")
-        # Timeline contradiction (e.g. yesterday vs months/years)
-        has_acute = any("yesterday" in pt.lower() or "today" in pt.lower() or "कल से" in pt for pt in patient_texts)
-        has_chronic = any("month" in pt.lower() or "year" in pt.lower() or "weeks" in pt.lower() or "महीने" in pt for pt in patient_texts)
+
+        # Timeline contradiction (acute vs chronic)
+        has_acute = any("yesterday" in pt.lower() or "today" in pt.lower() or "कल" in pt or "kal se" in pt.lower() or "aaj" in pt.lower() for pt in patient_texts)
+        has_chronic = any("month" in pt.lower() or "year" in pt.lower() or "weeks" in pt.lower() or "महीने" in pt or "mahine" in pt.lower() or "hafte" in pt.lower() for pt in patient_texts)
         if has_acute and has_chronic:
-            contradictions.append("Contradiction detected: Conflicting onset timeline (acute 'yesterday' vs chronic 'months/weeks').")
+            contradictions.append("Contradiction detected: Conflicting onset timeline (acute 'yesterday/today/kal' vs chronic 'months/weeks/mahine').")
 
         # Check uncertainties
-        if any(w in full_text for w in ["maybe", "might be", "not really sure", "i think so", "शायद", "पक्का नहीं"]):
+        if any(w in full_text for w in ["maybe", "might be", "not really sure", "i think so", "शायद", "पक्का नहीं", "shayad", "pakka nahi"]):
             uncertainties.append("Patient expressed uncertainty regarding symptoms or duration.")
 
         # If no primary symptoms extracted, use first phrase as symptom
@@ -523,7 +614,14 @@ class MedGemmaService:
             symptoms.append(chief)
 
         onset = "Not reported"
-        for pat in [r"(\d+\s*(?:day|days|hour|hours|week|weeks))\s*ago", r"since\s*(yesterday|this morning|\d+\s*days)", r"(\d+\s*(?:दिन|घंटे))\s*से", r"कल\s*से"]:
+        for pat in [
+            r"(\d+\s*(?:day|days|hour|hours|week|weeks))\s*ago",
+            r"since\s*(yesterday|this morning|\d+\s*days)",
+            r"(\d+\s*(?:दिन|घंटे))\s*से",
+            r"कल\s*से",
+            r"(\d+\s*(?:din|ghante))\s*se",
+            r"kal\s*se"
+        ]:
             m = re.search(pat, full_text)
             if m:
                 onset = m.group(0)
@@ -533,12 +631,12 @@ class MedGemmaService:
         sev_m = re.search(r"(\b[1-9]|10)\s*(?:out of 10|/10)", full_text)
         if sev_m:
             severity = f"{sev_m.group(1)}/10"
-        elif "severe" in full_text or "असहनीय" in full_text:
+        elif any(w in full_text for w in ["severe", "असहनीय", "बहुत तेज", "bahut tez", "tez dard", "asahniya"]):
             severity = "Severe"
-        elif "mild" in full_text or "हल्का" in full_text:
+        elif any(w in full_text for w in ["mild", "हल्का", "halka", "kam dard"]):
             severity = "Mild"
 
-        progression = "Worsening" if ("worse" in full_text or "बढ़ रहा" in full_text) else ("Improving" if ("better" in full_text or "कम हो रहा" in full_text) else "Not reported")
+        progression = "Worsening" if any(w in full_text for w in ["worse", "बढ़ रहा", "badh raha"]) else ("Improving" if any(w in full_text for w in ["better", "कम हो रहा", "kam ho raha"]) else "Not reported")
 
         # Dynamic urgency signals
         urgency_signals = []
@@ -563,7 +661,11 @@ class MedGemmaService:
         citations = {}
         for pt in patient_texts:
             for s in symptoms:
-                if s.lower() in pt.lower() or (s == "Chest pain" and ("सीने" in pt or "chhati" in pt)) or (s == "Fever" and ("बुखार" in pt or "bukhar" in pt)):
+                if (
+                    s.lower() in pt.lower()
+                    or (s == "Chest pain" and ("सीने" in pt or "chhati" in pt or "seene" in pt.lower()))
+                    or (s == "Fever" and ("बुखार" in pt or "bukhar" in pt.lower()))
+                ):
                     citations[s] = pt
 
         summary_text = (
@@ -583,21 +685,23 @@ class MedGemmaService:
             contradictions.append("Conflicting statements regarding presence of fever.")
 
         uncertainties = []
-        if any(w in full_text for w in ["maybe", "not sure", "i guess", "शायद"]):
+        if any(w in full_text for w in ["maybe", "not sure", "i guess", "शायद", "shayad"]):
             uncertainties.append("Patient expressed uncertainty regarding timeline or symptom intensity.")
 
-        # Explicit negative findings
+        # Explicit negative findings - strictly extracted from explicit patient statements
         denials = []
-        if "no fever" in full_text or "haven't had a fever" in full_text or "बुखार नहीं" in full_text:
+        if any(w in full_text for w in ["no fever", "haven't had a fever", "बुखार नहीं", "bukhar nahi"]):
             denials.append("Denies fever")
-        if "no head injury" in full_text or "didn't hit my head" in full_text:
+        if any(w in full_text for w in ["no head injury", "didn't hit my head", "सिर पर चोट नहीं लगी", "chot nahi lagi"]):
             denials.append("Denies head injury")
-        if "no chest pain" in full_text or "सीने में दर्द नहीं" in full_text:
+        if any(w in full_text for w in ["no chest pain", "सीने में दर्द नहीं", "छाती में दर्द नहीं", "chest pain nahi", "seene me dard nahi"]):
             denials.append("Denies chest pain")
-        if "no shortness of breath" in full_text or "सांस ठीक" in full_text:
+        if any(w in full_text for w in ["no shortness of breath", "सांस ठीक", "saans theek", "saans lene me koi dikkat nahi"]):
             denials.append("Denies shortness of breath")
-        if "chest pain" in full_text and "no chest pain" not in full_text:
-            denials.append("Denies prior cardiac history")
+        if any(w in full_text for w in ["no allergies", "no known allergies", "कोई एलर्जी नहीं", "koi allergy nahi"]):
+            denials.append("Denies allergies")
+        if any(w in full_text for w in ["not taking any medication", "no regular meds", "no meds", "कोई दवाई नहीं", "koi dawai nahi"]):
+            denials.append("Denies regular medications")
 
         return json.dumps({
             "chief_complaint": chief,

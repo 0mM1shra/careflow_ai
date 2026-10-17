@@ -45,7 +45,8 @@ class AdaptiveQuestioningService:
         patient_messages: List[str],
         current_question_count: int,
         assistant_messages: Optional[List[str]] = None,
-        evidence_state: Optional[Dict[str, Any]] = None
+        evidence_state: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "English"
     ) -> FollowUpQuestionOutput:
         """
         Determines the next follow-up question, guaranteeing no repetitive questions.
@@ -75,7 +76,7 @@ class AdaptiveQuestioningService:
         ]
 
         user_prompt = (
-            f"The patient has provided the following messages (turn count: {current_question_count}/{settings.MAX_FOLLOWUP_QUESTIONS}):\n\n"
+            f"The patient has provided the following messages (turn count: {current_question_count}/{settings.MAX_FOLLOWUP_QUESTIONS}, preferred language: {preferred_language}):\n\n"
             + "\n".join(user_content_blocks)
             + "\n\n"
             + (("PREVIOUSLY ASKED QUESTIONS (DO NOT REPEAT ANY OF THESE):\n" + "\n".join(prev_q_blocks) + "\n\n") if prev_q_blocks else "")

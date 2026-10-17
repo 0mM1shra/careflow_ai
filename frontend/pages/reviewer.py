@@ -378,14 +378,64 @@ with col_detail:
                     for fact, quote in citations.items():
                         st.markdown(f'<div class="citation-box"><strong>{fact}:</strong> &ldquo;{quote}&rdquo;</div>', unsafe_allow_html=True)
 
+            # Atomic Evidence Items & Source Provenance
+            evidence_items = case_data.get("evidence_items", [])
+            if evidence_items:
+                with st.expander(f"🔬 Atomic Evidence Items & Modality Provenance ({len(evidence_items)})", expanded=False):
+                    st.caption("Extracted clinical facts with explicit source modality, confidence, and verification status:")
+                    for item in evidence_items:
+                        f_name = item.get("field", "").replace("_", " ").title()
+                        f_val = str(item.get("value", ""))
+                        f_status = item.get("status", "reported").upper()
+                        f_source = item.get("source_type", "patient_message")
+                        f_conf = item.get("confidence")
+                        f_quote = item.get("source_quote", "")
+
+                        # Modality Badge
+                        if "voice" in f_source.lower():
+                            mod_badge = f'<span style="background:#EEF2FF; color:#4338CA; border:1px solid #C7D2FE; font-size:11px; padding:2px 6px; border-radius:6px; font-weight:600;">🎤 Voice (Conf: {int(f_conf*100) if f_conf is not None else "N/A"}%)</span>'
+                        elif "ocr" in f_source.lower() or "document" in f_source.lower():
+                            mod_badge = '<span style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; font-size:11px; padding:2px 6px; border-radius:6px; font-weight:600;">📄 Medical Report OCR</span>'
+                        else:
+                            mod_badge = '<span style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; font-size:11px; padding:2px 6px; border-radius:6px; font-weight:600;">💬 Typed Text</span>'
+
+                        # Status style
+                        stat_color = "#15803D" if f_status == "REPORTED" else ("#DC2626" if f_status in ["CONFLICTING", "UNCERTAIN"] else "#475569")
+                        stat_badge = f'<span style="background:{stat_color}15; color:{stat_color}; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; border:1px solid {stat_color}40;">{f_status}</span>'
+
+                        quote_str = f'<div style="font-size:12px; color:#64748B; margin-top:3px;"><em>Grounded Quote:</em> &ldquo;{f_quote}&rdquo;</div>' if f_quote else ""
+
+                        st.markdown(f"""
+                        <div style="border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; background: white;">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <strong>{f_name}:</strong> <span style="color:#0F172A; font-weight:500;">{f_val}</span>
+                                <div>{mod_badge} {stat_badge}</div>
+                            </div>
+                            {quote_str}
+                        </div>
+                        """, unsafe_allow_html=True)
+
             st.write("---")
 
             # Complete Conversation History
             with st.expander("💬 Complete Patient Conversation Transcript", expanded=False):
                 msgs = case_data.get("messages", [])
                 for m in msgs:
-                    role_label = "👤 Patient" if m["role"] == "patient" else "🤖 CareFlow Assistant"
-                    st.markdown(f"**{role_label}** `({m.get('created_at', '')[:19]})`:")
+                    if m["role"] == "patient":
+                        m_source = m.get("source_type", "patient_typed")
+                        if m_source == "voice":
+                            conf_str = f" | Conf: {int(m.get('transcription_confidence', 0)*100)}%" if m.get("transcription_confidence") is not None else ""
+                            lang_str = f" | {m.get('source_language')}" if m.get("source_language") else ""
+                            mod_label = f'<span style="background:#EEF2FF; color:#4338CA; border:1px solid #C7D2FE; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">🎤 Voice{lang_str}{conf_str}</span>'
+                        elif m_source == "ocr":
+                            mod_label = '<span style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">📄 Report OCR</span>'
+                        else:
+                            mod_label = '<span style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">💬 Typed</span>'
+                        role_label = f"👤 Patient {mod_label}"
+                    else:
+                        role_label = "🤖 CareFlow Assistant"
+
+                    st.markdown(f"**{role_label}** `({m.get('created_at', '')[:19]})`:", unsafe_allow_html=True)
                     st.write(f"> {m['content']}")
 
             # Reviewer Controls & Approval Form

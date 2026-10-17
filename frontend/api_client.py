@@ -50,9 +50,46 @@ class CareFlowAPIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def send_message(self, case_id: str, content: str) -> Dict[str, Any]:
-        payload = {"content": content}
+    def send_message(
+        self,
+        case_id: str,
+        content: str,
+        source_type: str = "patient_typed",
+        source_language: Optional[str] = None,
+        confidence: Optional[float] = None,
+        is_confirmed: bool = True
+    ) -> Dict[str, Any]:
+        payload = {
+            "content": content,
+            "source_type": source_type,
+            "source_language": source_language,
+            "transcription_confidence": confidence,
+            "is_confirmed": is_confirmed
+        }
         resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+
+    def transcribe_audio(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        language: Optional[str] = None,
+        model_size: Optional[str] = None
+    ) -> Dict[str, Any]:
+        files = {"file": (filename, file_bytes)}
+        params = {}
+        if language:
+            params["language"] = language
+        if model_size:
+            params["model_size"] = model_size
+        resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=45)
+        resp.raise_for_status()
+        return resp.json()
+
+    def preview_document_extraction(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
+        files = {"file": (filename, file_bytes)}
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/extract-document", files=files, timeout=40)
         resp.raise_for_status()
         return resp.json()
 

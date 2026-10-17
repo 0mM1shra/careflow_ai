@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 from backend.services.ocr_service import ocr_service
+from backend.services.transcription import transcription_service, TranscriptionError
+from backend.schemas.multilingual import TranscriptionResult, DocumentExtractionResult
 
 from backend.database.db import get_db
 from backend.database.models import Case, Message, Evidence, AuditEvent
@@ -47,14 +49,10 @@ def health_check(db: Session = Depends(get_db)):
     """Reports backend, database, and MedGemma readiness."""
     db_status = "ok"
     try:
-        db.execute("SELECT 1")
-    except Exception:
-        # For SQLAlchemy 2.0 raw select
-        try:
-            from sqlalchemy import text
-            db.execute(text("SELECT 1"))
-        except Exception as e:
-            db_status = f"unhealthy: {e}"
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"unhealthy: {e}"
 
     model_info = medgemma_service.get_status()
 
@@ -180,6 +178,72 @@ def get_case(case_id: str, db: Session = Depends(get_db)):
 
 
 # -------------------------------------------------------------
+# Multilingual Audio Transcription & Document OCR Preview
+# -------------------------------------------------------------
+@router.post("/transcribe-audio", response_model=TranscriptionResult)
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    language: Optional[str] = Query(None, description="Optional ISO language code, e.g. 'en', 'hi'"),
+    model_size: Optional[str] = Query(None, description="ASR model size: 'base' or 'tiny'")
+):
+    """
+    Transcribes audio input into text with detected language and confidence.
+    Does NOT automatically create a message or modify clinical state.
+    Allows patient review, editing, and explicit confirmation before submission.
+    """
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+    try:
+        result = transcription_service.transcribe_audio(
+            file_bytes=file_bytes,
+            filename=file.filename or "recording.wav",
+            language=language,
+            model_size=model_size
+        )
+        return result
+    except TranscriptionError as te:
+        raise HTTPException(status_code=400, detail=str(te))
+    except Exception as e:
+        logger.error(f"Audio transcription service error: {e}")
+        raise HTTPException(status_code=500, detail=f"Audio transcription failed: {e}")
+
+
+@router.post("/cases/{case_id}/extract-document", response_model=DocumentExtractionResult)
+async def preview_document_extraction(
+    case_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Extracts text from an uploaded medical report or prescription image/PDF
+    WITHOUT committing it to the clinical case transcript.
+    Enables patient review and editing of extracted findings before ingestion.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    allowed_extensions = {"png", "jpg", "jpeg", "webp", "bmp", "tiff", "pdf", "txt", "csv", "json"}
+    ext = file.filename.lower().split(".")[-1] if file.filename and "." in file.filename else ""
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Allowed extensions: {', '.join(sorted(allowed_extensions))}"
+        )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(file_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Uploaded file exceeds maximum allowed size (15 MB).")
+
+    result = ocr_service.extract_with_metadata(file_bytes, file.filename)
+    return result
+
+
+# -------------------------------------------------------------
 # Conversational Intake & Extraction
 # -------------------------------------------------------------
 @router.post("/cases/{case_id}/messages")
@@ -187,16 +251,21 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     """
     Appends a patient message, runs clinical extraction, updates evidence state,
     and runs interim triage to detect emergency red flags immediately.
+    Preserves source modality (typed, voice_transcript, ocr_extraction) and confidence.
     """
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
 
-    # Store verbatim message in SQLite
+    # Store verbatim message in SQLite with modality provenance
     msg = Message(
         case_id=case_id,
         role="patient",
         content=req.content.strip(),
+        source_type=req.source_type or "patient_typed",
+        source_language=req.source_language,
+        transcription_confidence=req.transcription_confidence,
+        is_confirmed=req.is_confirmed if req.is_confirmed is not None else True,
         created_at=datetime.utcnow()
     )
     db.add(msg)
@@ -241,6 +310,10 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         case.priority_category = "P0"
         case.priority_reasons_json = json.dumps(triage_res.reasons)
         db.commit()
+    elif triage_res.priority_category == "P1" and case.priority_category != "P0":
+        case.priority_category = "P1"
+        case.priority_reasons_json = json.dumps(triage_res.reasons)
+        db.commit()
 
     return {
         "status": "success",
@@ -266,9 +339,20 @@ async def upload_medical_document(
     if not case:
         raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
 
+    # Validate file extension
+    allowed_extensions = {"png", "jpg", "jpeg", "webp", "bmp", "tiff", "pdf", "txt", "csv", "json"}
+    ext = file.filename.lower().split(".")[-1] if file.filename and "." in file.filename else ""
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Allowed extensions: {', '.join(sorted(allowed_extensions))}"
+        )
+
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(file_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Uploaded file exceeds maximum allowed size (15 MB).")
 
     # Run OCR or PDF text extraction
     extracted_text = ocr_service.extract_text(file_bytes, file.filename)
@@ -279,6 +363,9 @@ async def upload_medical_document(
         case_id=case_id,
         role="patient",
         content=formatted_content,
+        source_type="ocr_extraction",
+        transcription_confidence=1.0,
+        is_confirmed=True,
         created_at=datetime.utcnow()
     )
     db.add(msg)
@@ -296,7 +383,7 @@ async def upload_medical_document(
             case=case,
             extraction=extraction,
             source_message=msg,
-            actor_role="patient"
+            actor_role="ai_system"
         )
         case.ai_status = "ready"
     except Exception as e:
@@ -314,6 +401,10 @@ async def upload_medical_document(
     )
     if triage_res.priority_category == "P0":
         case.priority_category = "P0"
+        case.priority_reasons_json = json.dumps(triage_res.reasons)
+        db.commit()
+    elif triage_res.priority_category == "P1" and case.priority_category != "P0":
+        case.priority_category = "P1"
         case.priority_reasons_json = json.dumps(triage_res.reasons)
         db.commit()
 
@@ -348,7 +439,8 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
         patient_messages=patient_msgs,
         current_question_count=turn_count,
         assistant_messages=assistant_msgs,
-        evidence_state=evidence_st
+        evidence_state=evidence_st,
+        preferred_language=case.preferred_language or "English"
     )
 
     # If a question was generated, store it in messages
