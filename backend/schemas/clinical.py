@@ -22,6 +22,15 @@ class EvidenceItemSchema(BaseModel):
     updated_at: Optional[str] = Field(None, description="ISO timestamp")
 
 
+class ClinicalUrgencySignal(BaseModel):
+    signal: str = Field(..., description="Identified clinical urgency sign or red-flag condition")
+    severity_level: Literal["emergency", "urgent", "moderate", "routine"] = Field(
+        ..., description="Model-reasoned clinical urgency level: emergency, urgent, moderate, or routine"
+    )
+    rationale: str = Field(..., description="Clinical reasoning explaining the urgency or physiological risk")
+    source_quote: str = Field(..., description="Verbatim quote from patient utterance or medical document supporting this signal")
+
+
 class ClinicalExtractionOutput(BaseModel):
     symptoms: List[str] = Field(default_factory=list, description="Primary reported symptoms")
     onset_and_duration: Optional[str] = Field(None, description="When symptoms began or how long they have lasted")
@@ -35,6 +44,7 @@ class ClinicalExtractionOutput(BaseModel):
     contradictions: List[str] = Field(default_factory=list, description="Detected conflicts across messages")
     uncertainties: List[str] = Field(default_factory=list, description="Uncertain or poorly supported statements")
     evidence_items: List[EvidenceItemSchema] = Field(default_factory=list, description="Atomic evidence units")
+    urgency_signals: List[ClinicalUrgencySignal] = Field(default_factory=list, description="Model-identified clinical urgency signals")
     is_sufficient_for_summary: bool = Field(False, description="Whether intake has reached sufficient detail")
 
 
@@ -58,6 +68,7 @@ class ClinicalSummaryOutput(BaseModel):
     missing_critical_information: List[str] = Field(default_factory=list, description="Crucial missing clinical data")
     contradictions: List[str] = Field(default_factory=list, description="Contradictions noted in statements")
     uncertainties: List[str] = Field(default_factory=list, description="Uncertain or poorly supported facts")
+    urgency_signals: List[ClinicalUrgencySignal] = Field(default_factory=list, description="Model-identified clinical urgency signals")
     evidence_citations: Dict[str, str] = Field(default_factory=dict, description="Fact -> verbatim patient quote")
     summary_text: str = Field(..., description="Clinician-facing factual synthesis")
 

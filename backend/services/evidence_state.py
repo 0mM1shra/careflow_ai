@@ -37,6 +37,7 @@ class EvidenceStateManager:
         uncertainties = list(old_state.get("uncertainties", []))
         unknowns = list(old_state.get("unknown_information", []))
         negatives = list(old_state.get("explicit_negative_findings", []))
+        urgency_signals = list(old_state.get("urgency_signals", []))
 
         # Merge extracted uncertainties & contradictions
         for c in extraction.contradictions:
@@ -51,6 +52,10 @@ class EvidenceStateManager:
         for neg in extraction.explicit_negative_findings:
             if neg not in negatives:
                 negatives.append(neg)
+        for sig in extraction.urgency_signals:
+            sig_dict = sig.model_dump() if hasattr(sig, "model_dump") else sig
+            if not any(s.get("signal") == sig_dict.get("signal") for s in urgency_signals):
+                urgency_signals.append(sig_dict)
 
         # Process each evidence item from extraction
         for item in extraction.evidence_items:
@@ -147,6 +152,7 @@ class EvidenceStateManager:
             "unknown_information": unknowns,
             "explicit_negative_findings": negatives,
             "missing_information": missing_critical,
+            "urgency_signals": urgency_signals,
             "last_updated": datetime.utcnow().isoformat()
         }
 

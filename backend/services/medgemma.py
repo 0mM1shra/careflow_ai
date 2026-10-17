@@ -233,21 +233,21 @@ class MedGemmaService:
         contradictions = []
         uncertainties = []
 
-        # Symptom detection
+        # Symptom detection (Multilingual: English, Hindi, Hinglish)
         symptom_patterns = [
-            ("chest pain", ["chest pain", "pressure in chest", "chest tightness"]),
-            ("shortness of breath", ["shortness of breath", "trouble breathing", "dyspnea", "breathless"]),
-            ("fever", ["fever", "high temperature", "chills", "feeling hot"]),
-            ("headache", ["headache", "migraine", "head throbbing", "head pain"]),
-            ("cough", ["cough", "coughing"]),
-            ("sore throat", ["sore throat", "throat hurts"]),
-            ("abdominal pain", ["abdominal pain", "stomach ache", "belly pain", "stomach pain"]),
-            ("nausea and vomiting", ["nausea", "vomiting", "threw up", "throwing up"]),
-            ("dizziness", ["dizziness", "dizzy", "lightheaded"]),
-            ("rash", ["rash", "skin redness", "hives", "itching"]),
-            ("neck stiffness", ["stiff neck", "neck stiffness", "cannot bend neck"]),
-            ("facial drooping", ["facial drooping", "face droop", "slurred speech", "weakness on one side"]),
-            ("runny nose", ["runny nose", "sneezing", "congestion", "tickle in throat"]),
+            ("chest pain", ["chest pain", "pressure in chest", "chest tightness", "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain"]),
+            ("shortness of breath", ["shortness of breath", "trouble breathing", "dyspnea", "breathless", "सांस लेने में तकलीफ", "दम फूलना", "सांस फूलना", "saans lene me takleef", "dam phoolna"]),
+            ("fever", ["fever", "high temperature", "chills", "feeling hot", "बुखार", "तेज बुखार", "bukhar", "taap"]),
+            ("headache", ["headache", "migraine", "head throbbing", "head pain", "सिरदर्द", "सिर में दर्द", "sir dard", "sar me dard"]),
+            ("cough", ["cough", "coughing", "खांसी", "khansi"]),
+            ("sore throat", ["sore throat", "throat hurts", "गले में खराश", "गले में दर्द", "gale me dard", "gala kharab"]),
+            ("abdominal pain", ["abdominal pain", "stomach ache", "belly pain", "stomach pain", "पेट में दर्द", "पेट दर्द", "pet dard", "pet me dard"]),
+            ("nausea and vomiting", ["nausea", "vomiting", "threw up", "throwing up", "उल्टी", "जी मिचलाना", "ulti", "vomit"]),
+            ("dizziness", ["dizziness", "dizzy", "lightheaded", "चक्कर", "chakkar"]),
+            ("rash", ["rash", "skin redness", "hives", "itching", "खुजली", "चकत्ते", "khujli"]),
+            ("neck stiffness", ["stiff neck", "neck stiffness", "cannot bend neck", "गर्दन में अकड़न", "गर्दन अकड़", "gardan akad", "gardan me dard"]),
+            ("facial drooping", ["facial drooping", "face droop", "slurred speech", "weakness on one side", "चेहरा टेढ़ा", "बोलने में परेशानी", "लकवा"]),
+            ("runny nose", ["runny nose", "sneezing", "congestion", "tickle in throat", "छींक", "नाक बहना", "chheenk"]),
         ]
 
         for canonical, phrases in symptom_patterns:
@@ -268,14 +268,57 @@ class MedGemmaService:
                                 break
                     break
 
+        # Dynamic Clinical Urgency Signals (Model Thinking)
+        urgency_signals = []
+        for pt in patient_texts:
+            pt_l = pt.lower()
+            # Emergency: Acute Coronary / Cardiopulmonary / Stroke signs
+            if any(term in pt_l for term in ["chest pain", "crushing", "radiat", "सीने में दर्द", "बाएं हाथ", "छाती में दर्द"]) and any(r in pt_l for r in ["arm", "jaw", "neck", "बाएं हाथ", "गर्दन"]):
+                urgency_signals.append({
+                    "signal": "Acute Coronary Syndrome Red Flag",
+                    "severity_level": "emergency",
+                    "rationale": "Crushing chest discomfort radiating to left arm/jaw indicates potential acute myocardial infarction.",
+                    "source_quote": pt
+                })
+            elif any(term in pt_l for term in ["can't breathe", "cannot breathe", "gasping", "सांस नहीं आ रही", "दम घुट रहा"]):
+                urgency_signals.append({
+                    "signal": "Acute Severe Respiratory Compromise",
+                    "severity_level": "emergency",
+                    "rationale": "Inability to breathe adequately represents acute airway or ventilatory failure.",
+                    "source_quote": pt
+                })
+            elif any(term in pt_l for term in ["facial droop", "slurred speech", "weakness on one side", "चेहरा टेढ़ा", "लकवा"]):
+                urgency_signals.append({
+                    "signal": "Acute Neurological Deficit (FAST)",
+                    "severity_level": "emergency",
+                    "rationale": "Focal acute neurological symptoms indicate potential cerebrovascular accident / stroke.",
+                    "source_quote": pt
+                })
+            # Urgent: Meningeal signs / High Fever + Stiff neck
+            elif (any(f in pt_l for f in ["fever", "बुखार", "bukhar", "high temp"]) and any(s in pt_l for s in ["stiff", "neck", "गर्दन में अकड़न", "gardan akad"])) or "stiff neck" in pt_l:
+                urgency_signals.append({
+                    "signal": "Possible Meningeal Irritation Signs",
+                    "severity_level": "urgent",
+                    "rationale": "Febrile presentation accompanied by nuchal rigidity requires urgent clinical assessment to rule out meningitis.",
+                    "source_quote": pt
+                })
+            # Urgent: Severe Pain >= 8/10
+            elif any(p in pt_l for p in ["8/10", "9/10", "10/10", "8 out of 10", "9 out of 10", "10 out of 10", "असहनीय दर्द", "बहुत तेज दर्द"]):
+                urgency_signals.append({
+                    "signal": "Severe Acute Pain Acuity",
+                    "severity_level": "urgent",
+                    "rationale": "Severe pain intensity rating (>= 8/10) warrants prompt medical evaluation and analgesia.",
+                    "source_quote": pt
+                })
+
         # Check for explicit denials (negatives)
         denial_patterns = [
-            ("denies chest pain", ["no chest pain", "not having chest pain", "don't have chest pain"]),
-            ("denies fever", ["no fever", "haven't had a fever", "temp is normal"]),
-            ("denies shortness of breath", ["no shortness of breath", "breathing is fine", "can breathe normally"]),
-            ("denies allergies", ["no allergies", "no known allergies"]),
-            ("denies medications", ["not taking any medication", "no regular meds", "no meds"]),
-            ("denies head injury", ["no head injury", "didn't hit my head"])
+            ("denies chest pain", ["no chest pain", "not having chest pain", "don't have chest pain", "सीने में दर्द नहीं है"]),
+            ("denies fever", ["no fever", "haven't had a fever", "temp is normal", "बुखार नहीं है"]),
+            ("denies shortness of breath", ["no shortness of breath", "breathing is fine", "can breathe normally", "सांस ठीक है"]),
+            ("denies allergies", ["no allergies", "no known allergies", "कोई एलर्जी नहीं"]),
+            ("denies medications", ["not taking any medication", "no regular meds", "no meds", "कोई दवाई नहीं"]),
+            ("denies head injury", ["no head injury", "didn't hit my head", "सिर पर चोट नहीं लगी"])
         ]
         for canonical, phrases in denial_patterns:
             for phrase in phrases:
@@ -288,7 +331,9 @@ class MedGemmaService:
             r"(\d+\s*(?:day|days|hour|hours|week|weeks|month|months|minutes))\s*ago",
             r"for\s*(?:the\s*past\s*)?(\d+\s*(?:day|days|hour|hours|week|weeks))",
             r"started\s*(?:about\s*)?(\d+\s*(?:day|days|hour|hours|week|weeks)\s*ago|yesterday|this morning)",
-            r"since\s*(yesterday|this morning|last night|\d+\s*(?:days|weeks))"
+            r"since\s*(yesterday|this morning|last night|\d+\s*(?:days|weeks))",
+            r"(\d+\s*(?:दिन|घंटे|महीने|हफ्ते))\s*से",
+            r"कल\s*से|आज\s*सुबह\s*से"
         ]
         for pat in duration_patterns:
             m = re.search(pat, full_text)
@@ -300,41 +345,40 @@ class MedGemmaService:
         severity_match = re.search(r"(\b[1-9]|10)\s*(?:out of 10|/10)", full_text)
         if severity_match:
             severity = f"{severity_match.group(1)}/10"
-        elif "severe" in full_text:
+        elif "severe" in full_text or "असहनीय" in full_text or "बहुत तेज" in full_text:
             severity = "Severe"
-        elif "mild" in full_text:
+        elif "mild" in full_text or "हल्का" in full_text:
             severity = "Mild"
-        elif "moderate" in full_text:
+        elif "moderate" in full_text or "मध्यम" in full_text:
             severity = "Moderate"
 
         # Check progression
-        if "worse" in full_text or "worsening" in full_text or "getting worse" in full_text:
+        if any(w in full_text for w in ["worse", "worsening", "getting worse", "बढ़ रहा", "खराब हो रहा"]):
             progression = "Worsening"
-        elif "better" in full_text or "improving" in full_text:
+        elif any(w in full_text for w in ["better", "improving", "सुधार", "कम हो रहा"]):
             progression = "Improving"
-        elif "constant" in full_text or "same" in full_text:
+        elif any(w in full_text for w in ["constant", "same", "लगातार", "वैसा ही"]):
             progression = "Constant"
 
         # Check for unknown / skipped
         for pt in patient_texts:
             pt_low = pt.lower().strip()
-            if any(term in pt_low for term in ["skip", "don't know", "dont know", "not sure", "unknown", "no idea"]):
+            if any(term in pt_low for term in ["skip", "don't know", "dont know", "not sure", "unknown", "no idea", "पता नहीं", "मालूम नहीं", "छोड़ें"]):
                 unknowns.append(f"Patient indicated unknown or skipped: '{pt}'")
 
         # Check for contradictions across texts
-        # E.g. one text mentions "no fever" and another mentions "fever"
         if any("no fever" in pt.lower() for pt in patient_texts) and any("fever" in pt.lower() and "no fever" not in pt.lower() for pt in patient_texts):
             contradictions.append("Contradiction detected: Patient reported both having and not having fever.")
         if any("no chest pain" in pt.lower() for pt in patient_texts) and any("chest pain" in pt.lower() and "no chest pain" not in pt.lower() for pt in patient_texts):
             contradictions.append("Contradiction detected: Patient reported both having and not having chest pain.")
         # Timeline contradiction (e.g. yesterday vs months/years)
-        has_acute = any("yesterday" in pt.lower() or "today" in pt.lower() for pt in patient_texts)
-        has_chronic = any("month" in pt.lower() or "year" in pt.lower() or "weeks" in pt.lower() for pt in patient_texts)
+        has_acute = any("yesterday" in pt.lower() or "today" in pt.lower() or "कल से" in pt for pt in patient_texts)
+        has_chronic = any("month" in pt.lower() or "year" in pt.lower() or "weeks" in pt.lower() or "महीने" in pt for pt in patient_texts)
         if has_acute and has_chronic:
             contradictions.append("Contradiction detected: Conflicting onset timeline (acute 'yesterday' vs chronic 'months/weeks').")
 
         # Check uncertainties
-        if any(w in full_text for w in ["maybe", "might be", "not really sure", "i think so"]):
+        if any(w in full_text for w in ["maybe", "might be", "not really sure", "i think so", "शायद", "पक्का नहीं"]):
             uncertainties.append("Patient expressed uncertainty regarding symptoms or duration.")
 
         # If no primary symptoms extracted, use first phrase as symptom
@@ -356,6 +400,7 @@ class MedGemmaService:
             "contradictions": contradictions,
             "uncertainties": uncertainties,
             "evidence_items": evidence_items,
+            "urgency_signals": urgency_signals,
             "is_sufficient_for_summary": is_sufficient
         }
         return json.dumps(result)
@@ -368,75 +413,77 @@ class MedGemmaService:
         already_asked = re.findall(r"<previously_asked_question>(.*?)</previously_asked_question>", prompt, re.DOTALL)
         asked_text = " ".join(already_asked).lower()
 
+        is_hindi = bool(re.search(r'[\u0900-\u097F]', full_text) or "hindi" in prompt.lower())
+
         # If 3 or more questions have already been asked, conclude questioning
         if len(already_asked) >= 3:
             return json.dumps({
                 "next_question": None,
-                "reason_for_question": "Sufficient clinical information has been gathered across primary dimensions.",
+                "reason_for_question": "पर्याप्त जानकारी एकत्रित की जा चुकी है।" if is_hindi else "Sufficient clinical information has been gathered across primary dimensions.",
                 "target_field": "intake_complete",
                 "is_terminal": True
             })
 
         # Priority 1: Cardiac Red Flags (if chest pain mentioned and not yet asked)
-        if ("chest pain" in full_text or "chest" in full_text) and "radiat" not in asked_text:
+        if ("chest pain" in full_text or "chest" in full_text or "सीने में दर्द" in full_text or "chhati" in full_text) and "radiat" not in asked_text and "फैल" not in asked_text:
             return json.dumps({
-                "next_question": "Does the chest pain radiate to your left arm, neck, jaw, or back?",
+                "next_question": "क्या सीने का दर्द आपके बाएं हाथ, गर्दन, जबड़े या पीठ की तरफ फैल रहा है?" if is_hindi else "Does the chest pain radiate to your left arm, neck, jaw, or back?",
                 "reason_for_question": "Screening for classic acute coronary radiation warning signs.",
                 "target_field": "pain_radiation",
                 "is_terminal": False
             })
 
         # Priority 2: Cardiopulmonary Associated Symptoms (if chest/breath mentioned and not yet asked)
-        if ("chest" in full_text or "breath" in full_text) and "shortness of breath" not in asked_text and "sweating" not in asked_text:
+        if ("chest" in full_text or "breath" in full_text or "सांस" in full_text) and "shortness of breath" not in asked_text and "sweating" not in asked_text and "पसीना" not in asked_text:
             return json.dumps({
-                "next_question": "Are you experiencing any shortness of breath, lightheadedness, or cold sweats along with your symptoms?",
+                "next_question": "क्या आपको सांस लेने में तकलीफ, चक्कर या अत्यधिक पसीना आ रहा है?" if is_hindi else "Are you experiencing any shortness of breath, lightheadedness, or cold sweats along with your symptoms?",
                 "reason_for_question": "Assessing associated symptoms of cardiopulmonary compromise.",
                 "target_field": "associated_cardiac_symptoms",
                 "is_terminal": False
             })
 
         # Priority 3: Meningeal Signs (if fever or headache mentioned and not yet asked)
-        if ("fever" in full_text or "headache" in full_text) and "stiff" not in asked_text and "neck" not in asked_text:
+        if ("fever" in full_text or "headache" in full_text or "बुखार" in full_text or "सिरदर्द" in full_text) and "stiff" not in asked_text and "neck" not in asked_text and "अकड़न" not in asked_text:
             return json.dumps({
-                "next_question": "Do you have any neck stiffness, sensitivity to bright light, or confusion?",
+                "next_question": "क्या आपको गर्दन में अकड़न, तेज रोशनी से परेशानी या अत्यधिक सिरदर्द है?" if is_hindi else "Do you have any neck stiffness, sensitivity to bright light, or confusion?",
                 "reason_for_question": "Screening for meningeal irritation signs in febrile or headache patients.",
                 "target_field": "neck_stiffness_photophobia",
                 "is_terminal": False
             })
 
         # Priority 4: Onset & Duration (if not yet asked and not explicitly reported)
-        if "begin" not in asked_text and "when did" not in asked_text:
-            if not any(w in full_text for w in ["yesterday", "day", "hour", "week", "since", "ago", "started"]):
+        if "begin" not in asked_text and "when did" not in asked_text and "शुरू" not in asked_text:
+            if not any(w in full_text for w in ["yesterday", "day", "hour", "week", "since", "ago", "started", "कल से", "दिन से", "घंटे से"]):
                 return json.dumps({
-                    "next_question": "When did these symptoms first begin, and have they been getting better, worse, or staying constant?",
+                    "next_question": "यह लक्षण सबसे पहले कब शुरू हुए और क्या यह समय के साथ बढ़ रहे हैं या स्थिर हैं?" if is_hindi else "When did these symptoms first begin, and have they been getting better, worse, or staying constant?",
                     "reason_for_question": "Onset and duration are essential for triage acuity.",
                     "target_field": "onset_and_duration",
                     "is_terminal": False
                 })
 
         # Priority 5: Severity (if not yet asked and not explicitly reported)
-        if "scale" not in asked_text and "0 to 10" not in asked_text and "severity" not in asked_text:
-            if not any(w in full_text for w in ["/10", "out of 10", "mild", "moderate", "severe"]):
+        if "scale" not in asked_text and "0 to 10" not in asked_text and "severity" not in asked_text and "पैमाने" not in asked_text:
+            if not any(w in full_text for w in ["/10", "out of 10", "mild", "moderate", "severe", "असहनीय", "बहुत तेज"]):
                 return json.dumps({
-                    "next_question": "On a scale from 0 to 10 (where 0 is no discomfort and 10 is unbearable), how severe is your symptom right now?",
+                    "next_question": "0 से 10 के पैमाने पर (जहाँ 0 कोई दर्द नहीं और 10 असहनीय दर्द है), अभी दर्द कितना तीव्र है?" if is_hindi else "On a scale from 0 to 10 (where 0 is no discomfort and 10 is unbearable), how severe is your symptom right now?",
                     "reason_for_question": "Quantifying symptom severity to establish clinical acuity.",
                     "target_field": "severity",
                     "is_terminal": False
                 })
 
         # Priority 6: Aggravating or Relieving Factors (if not yet asked)
-        if "better or worse" not in asked_text and "reliev" not in asked_text and "aggravat" not in asked_text:
+        if "better or worse" not in asked_text and "reliev" not in asked_text and "aggravat" not in asked_text and "कम या ज्यादा" not in asked_text:
             return json.dumps({
-                "next_question": "Does anything in particular make your symptoms better or worse (such as rest, eating, moving, or position)?",
+                "next_question": "क्या किसी विशेष स्थिति (जैसे आराम करने, चलने या खाने) से यह दर्द कम या ज्यादा होता है?" if is_hindi else "Does anything in particular make your symptoms better or worse (such as rest, eating, moving, or position)?",
                 "reason_for_question": "Identifying clinical triggers and alleviating factors.",
                 "target_field": "aggravating_relieving",
                 "is_terminal": False
             })
 
         # Priority 7: Medications & Allergies (if not yet asked)
-        if "medicat" not in asked_text and "allerg" not in asked_text:
+        if "medicat" not in asked_text and "allerg" not in asked_text and "दवाइयाँ" not in asked_text:
             return json.dumps({
-                "next_question": "Are you currently taking any regular medications, or do you have any known medical conditions or allergies?",
+                "next_question": "क्या आप कोई नियमित दवाइयाँ ले रहे हैं, या आपको कोई पुरानी बीमारी या एलर्जी है?" if is_hindi else "Are you currently taking any regular medications, or do you have any known medical conditions or allergies?",
                 "reason_for_question": "Identifying relevant baseline health status and contraindications.",
                 "target_field": "medications_and_history",
                 "is_terminal": False
@@ -445,7 +492,7 @@ class MedGemmaService:
         # Otherwise sufficient
         return json.dumps({
             "next_question": None,
-            "reason_for_question": "Sufficient clinical information has been gathered for intake.",
+            "reason_for_question": "पर्याप्त जानकारी एकत्रित की जा चुकी है।" if is_hindi else "Sufficient clinical information has been gathered for intake.",
             "target_field": "intake_complete",
             "is_terminal": True
         })
@@ -460,21 +507,23 @@ class MedGemmaService:
             chief = chief[:117] + "..."
 
         symptoms = []
-        if "chest pain" in full_text:
+        if "chest pain" in full_text or "सीने में दर्द" in full_text or "chhati" in full_text:
             symptoms.append("Chest pain")
-        if "fever" in full_text:
+        if "fever" in full_text or "बुखार" in full_text or "bukhar" in full_text:
             symptoms.append("Fever")
-        if "shortness of breath" in full_text:
+        if "shortness of breath" in full_text or "सांस" in full_text:
             symptoms.append("Shortness of breath")
-        if "headache" in full_text:
+        if "headache" in full_text or "सिरदर्द" in full_text or "sir dard" in full_text:
             symptoms.append("Headache")
-        if "cough" in full_text:
+        if "cough" in full_text or "खांसी" in full_text:
             symptoms.append("Cough")
+        if "sore throat" in full_text or "गले में" in full_text:
+            symptoms.append("Sore throat")
         if not symptoms:
             symptoms.append(chief)
 
         onset = "Not reported"
-        for pat in [r"(\d+\s*(?:day|days|hour|hours|week|weeks))\s*ago", r"since\s*(yesterday|this morning|\d+\s*days)"]:
+        for pat in [r"(\d+\s*(?:day|days|hour|hours|week|weeks))\s*ago", r"since\s*(yesterday|this morning|\d+\s*days)", r"(\d+\s*(?:दिन|घंटे))\s*से", r"कल\s*से"]:
             m = re.search(pat, full_text)
             if m:
                 onset = m.group(0)
@@ -484,24 +533,43 @@ class MedGemmaService:
         sev_m = re.search(r"(\b[1-9]|10)\s*(?:out of 10|/10)", full_text)
         if sev_m:
             severity = f"{sev_m.group(1)}/10"
-        elif "severe" in full_text:
+        elif "severe" in full_text or "असहनीय" in full_text:
             severity = "Severe"
-        elif "mild" in full_text:
+        elif "mild" in full_text or "हल्का" in full_text:
             severity = "Mild"
 
-        progression = "Worsening" if "worse" in full_text else ("Improving" if "better" in full_text else "Not reported")
+        progression = "Worsening" if ("worse" in full_text or "बढ़ रहा" in full_text) else ("Improving" if ("better" in full_text or "कम हो रहा" in full_text) else "Not reported")
+
+        # Dynamic urgency signals
+        urgency_signals = []
+        for pt in patient_texts:
+            pt_l = pt.lower()
+            if any(term in pt_l for term in ["chest pain", "crushing", "radiat", "सीने में दर्द", "बाएं हाथ"]) and any(r in pt_l for r in ["arm", "jaw", "neck", "बाएं हाथ", "गर्दन"]):
+                urgency_signals.append({
+                    "signal": "Acute Coronary Syndrome Red Flag",
+                    "severity_level": "emergency",
+                    "rationale": "Crushing chest discomfort radiating to left arm/jaw indicates potential acute myocardial infarction.",
+                    "source_quote": pt
+                })
+            elif (any(f in pt_l for f in ["fever", "बुखार", "bukhar"]) and any(s in pt_l for s in ["stiff", "neck", "गर्दन में अकड़न"])) or "stiff neck" in pt_l:
+                urgency_signals.append({
+                    "signal": "Possible Meningeal Irritation Signs",
+                    "severity_level": "urgent",
+                    "rationale": "Febrile presentation accompanied by nuchal rigidity requires urgent clinical assessment to rule out meningitis.",
+                    "source_quote": pt
+                })
 
         # Build citations
         citations = {}
         for pt in patient_texts:
             for s in symptoms:
-                if s.lower() in pt.lower():
+                if s.lower() in pt.lower() or (s == "Chest pain" and ("सीने" in pt or "chhati" in pt)) or (s == "Fever" and ("बुखार" in pt or "bukhar" in pt)):
                     citations[s] = pt
 
         summary_text = (
             f"Patient presents with {chief}. Reported symptoms include {', '.join(symptoms)}. "
             f"Onset: {onset}. Severity: {severity}. Progression: {progression}. "
-            f"Intake completed via CareFlow conversational protocol."
+            f"Intake completed via CareFlow multilingual clinical protocol."
         )
 
         missing = []
@@ -515,18 +583,18 @@ class MedGemmaService:
             contradictions.append("Conflicting statements regarding presence of fever.")
 
         uncertainties = []
-        if any(w in full_text for w in ["maybe", "not sure", "i guess"]):
+        if any(w in full_text for w in ["maybe", "not sure", "i guess", "शायद"]):
             uncertainties.append("Patient expressed uncertainty regarding timeline or symptom intensity.")
 
         # Explicit negative findings
         denials = []
-        if "no fever" in full_text or "haven't had a fever" in full_text:
+        if "no fever" in full_text or "haven't had a fever" in full_text or "बुखार नहीं" in full_text:
             denials.append("Denies fever")
         if "no head injury" in full_text or "didn't hit my head" in full_text:
             denials.append("Denies head injury")
-        if "no chest pain" in full_text:
+        if "no chest pain" in full_text or "सीने में दर्द नहीं" in full_text:
             denials.append("Denies chest pain")
-        if "no shortness of breath" in full_text:
+        if "no shortness of breath" in full_text or "सांस ठीक" in full_text:
             denials.append("Denies shortness of breath")
         if "chest pain" in full_text and "no chest pain" not in full_text:
             denials.append("Denies prior cardiac history")
@@ -544,6 +612,7 @@ class MedGemmaService:
             "missing_critical_information": missing,
             "contradictions": contradictions,
             "uncertainties": uncertainties,
+            "urgency_signals": urgency_signals,
             "evidence_citations": citations,
             "summary_text": summary_text
         })

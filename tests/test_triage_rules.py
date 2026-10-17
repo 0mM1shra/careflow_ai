@@ -92,3 +92,57 @@ def test_ai_failure_never_produces_routine_priority():
     assert result.priority_category == "ERR"
     assert "Review Required — AI Unavailable" in result.priority_label
     assert result.triggered_rules[0].rule_id == "RULE-SYS-01"
+
+
+def test_p0_emergency_hindi_cardiac():
+    """Bilingual Hindi symptom (सीने में दर्द radiating to बांह) triggers P0 emergency triage."""
+    messages = [
+        "सीने में बहुत तेज दबाव और दर्द है, दर्द बाएं हाथ तक जा रहा है और सांस फूल रही है।"
+    ]
+    evidence_state = {"facts": {}}
+
+    result = triage_engine.evaluate(evidence_state, messages, ai_status="ready")
+    assert result.priority_category == "P0"
+    assert any("RULE-P0" in t.rule_id for t in result.triggered_rules)
+
+
+def test_generalized_model_urgency_signal_p0():
+    """MedGemma-reasoned emergency urgency signal elevates unscripted symptoms to P0."""
+    messages = [
+        "My throat is closing up after a bee sting and I am gasping for air."
+    ]
+    evidence_state = {
+        "urgency_signals": [
+            {
+                "signal": "anaphylactic_airway_compromise",
+                "severity_level": "emergency",
+                "rationale": "Rapidly progressing acute airway obstruction following hymenoptera sting",
+                "source_quote": "throat is closing up after a bee sting and I am gasping for air"
+            }
+        ]
+    }
+
+    result = triage_engine.evaluate(evidence_state, messages, ai_status="ready")
+    assert result.priority_category == "P0"
+    assert any(t.rule_id == "RULE-P0-MODEL-01" for t in result.triggered_rules)
+
+
+def test_generalized_model_urgency_signal_p1():
+    """MedGemma-reasoned urgent signal elevates unscripted condition to P1."""
+    messages = [
+        "Severe pain started around my belly button and has moved to my right lower side."
+    ]
+    evidence_state = {
+        "urgency_signals": [
+            {
+                "signal": "suspected_acute_appendicitis",
+                "severity_level": "urgent",
+                "rationale": "Periumbilical pain migrating to right lower quadrant concerning for acute surgical abdomen",
+                "source_quote": "pain started around my belly button and has moved to my right lower side"
+            }
+        ]
+    }
+
+    result = triage_engine.evaluate(evidence_state, messages, ai_status="ready")
+    assert result.priority_category == "P1"
+    assert any(t.rule_id == "RULE-P1-MODEL-01" for t in result.triggered_rules)

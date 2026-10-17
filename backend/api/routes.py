@@ -3,9 +3,10 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
+from backend.services.ocr_service import ocr_service
 
 from backend.database.db import get_db
 from backend.database.models import Case, Message, Evidence, AuditEvent
@@ -244,6 +245,83 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     return {
         "status": "success",
         "message": msg.to_dict(),
+        "interim_priority": triage_res.priority_category,
+        "warning_signs": triage_res.warning_signs,
+        "is_emergency": triage_res.priority_category == "P0"
+    }
+
+
+@router.post("/cases/{case_id}/upload-document")
+async def upload_medical_document(
+    case_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Accepts an uploaded PDF, prescription, or medical image,
+    runs OCR / text extraction, appends it as a patient message,
+    and updates evidence state with clinical fact extraction.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # Run OCR or PDF text extraction
+    extracted_text = ocr_service.extract_text(file_bytes, file.filename)
+    formatted_content = f"[Uploaded Medical Document ({file.filename}) OCR]:\n{extracted_text}"
+
+    # Store in messages
+    msg = Message(
+        case_id=case_id,
+        role="patient",
+        content=formatted_content,
+        created_at=datetime.utcnow()
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    # Collect all patient messages so far
+    all_msgs = [m.content for m in case.messages if m.role == "patient"]
+
+    # Run clinical extraction
+    try:
+        extraction = clinical_extraction_service.extract_clinical_facts(all_msgs)
+        EvidenceStateManager.update_evidence_state(
+            db=db,
+            case=case,
+            extraction=extraction,
+            source_message=msg,
+            actor_role="patient"
+        )
+        case.ai_status = "ready"
+    except Exception as e:
+        logger.error(f"Error during extraction for uploaded document in case {case_id}: {e}")
+        case.ai_status = "failed"
+        case.priority_category = "ERR"
+        db.commit()
+
+    # Interim Red-Flag Check
+    current_evidence = json.loads(case.evidence_state_json or "{}")
+    triage_res = triage_engine.evaluate(
+        evidence_state=current_evidence,
+        raw_messages=all_msgs,
+        ai_status=case.ai_status
+    )
+    if triage_res.priority_category == "P0":
+        case.priority_category = "P0"
+        case.priority_reasons_json = json.dumps(triage_res.reasons)
+        db.commit()
+
+    return {
+        "status": "success",
+        "filename": file.filename,
+        "extracted_text": extracted_text,
+        "char_count": len(extracted_text),
         "interim_priority": triage_res.priority_category,
         "warning_signs": triage_res.warning_signs,
         "is_emergency": triage_res.priority_category == "P0"

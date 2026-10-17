@@ -28,73 +28,73 @@ class DeterministicTriageEngine:
 
     PROTOCOL_VERSION = settings.TRIAGE_RULE_VERSION
 
-    # P0: Emergency Red Flag Rules
+    # P0: Emergency Red Flag Rules (Bilingual English & Hindi)
     P0_RULES = [
         {
             "id": "RULE-P0-CARD-01",
             "name": "Acute Coronary Syndrome Red Flag",
             "criterion": "Chest pain radiating to left arm, neck, or jaw",
-            "pattern": r"(chest\s*pain|pressure\s*in\s*chest|chest\s*tightness).*(radiat|arm|jaw|neck)|(radiat|arm|jaw|neck).*(chest\s*pain|chest\s*pressure)",
+            "pattern": r"(chest\s*pain|pressure\s*in\s*chest|chest\s*tightness|सीने\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव|भारी)|छाती\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव)|सीना\s*भारी|chhati\s*me\s*dard|seene\s*me\s*(?:.{0,25}?)(?:dard|dabav)).*(radiat|arm|jaw|neck|बाएं\s*हाथ|बाँह|बांह|गर्दन|जबड़े|haath\s*me|gardan)|(radiat|arm|jaw|neck|बाएं\s*हाथ|बाँह|बांह|गर्दन|जबड़े).*(chest\s*pain|chest\s*pressure|सीने\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव)|छाती\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव))",
             "action": "Immediate emergency department transfer; activate acute coronary protocol."
         },
         {
             "id": "RULE-P0-RESP-02",
             "name": "Acute Severe Respiratory Compromise",
             "criterion": "Severe shortness of breath, inability to speak full sentences, or stridor",
-            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking)",
+            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking|सांस\s*फूल|दम\s*फूल|सांस\s*लेने\s*में\s*(?:.{0,20}?)(?:तकलीफ|दिक्कत|परेशानी)|दम\s*घुट|सांस\s*नहीं\s*आ\s*रही|saans\s*lene\s*me\s*takleef|dam\s*phool\s*raha)",
             "action": "Immediate respiratory assessment and oxygenation support."
         },
         {
             "id": "RULE-P0-NEURO-03",
             "name": "Acute Stroke Symptom Complex (FAST)",
             "criterion": "Sudden facial drooping, arm weakness, or slurred speech",
-            "pattern": r"(facial\s*droop|face\s*droop|slurred\s*speech|weakness\s*on\s*one\s*side|sudden\s*numbness|can't\s*move\s*arm)",
+            "pattern": r"(facial\s*droop|face\s*droop|slurred\s*speech|weakness\s*on\s*one\s*side|sudden\s*numbness|can't\s*move\s*arm|चेहरा\s*टेढ़ा|बोलने\s*में\s*दिक्कत|लकवा|ek\s*taraf\s*kamzori)",
             "action": "Activate emergency stroke pathway; record time of last known normal."
         },
         {
             "id": "RULE-P0-HEM-04",
             "name": "Severe Hemorrhage or Vascular Collapse",
             "criterion": "Uncontrolled bleeding, vomiting blood, or sudden syncope with chest/back pain",
-            "pattern": r"(vomiting\s*blood|coughing\s*up\s*blood|uncontrolled\s*bleeding|passed\s*out|syncope)",
+            "pattern": r"(vomiting\s*blood|coughing\s*up\s*blood|uncontrolled\s*bleeding|passed\s*out|syncope|खून\s*की\s*उल्टी|बेहोश|khoon\s*ki\s*ulti|behosh)",
             "action": "Immediate resuscitation and surgical/trauma evaluation."
         },
         {
             "id": "RULE-P0-ANAPH-05",
             "name": "Anaphylaxis Warning Signs",
             "criterion": "Swelling of lips/tongue/throat with respiratory distress or sudden generalized hives",
-            "pattern": r"(swollen\s*tongue|swollen\s*throat|throat\s*closing|lips\s*swelling|anaphylaxis)",
+            "pattern": r"(swollen\s*tongue|swollen\s*throat|throat\s*closing|lips\s*swelling|anaphylaxis|गला\s*बंद|जीभ\s*सूज|होंठ\s*सूज)",
             "action": "Immediate intramuscular epinephrine and airway management."
         }
     ]
 
-    # P1: Urgent Review Rules
+    # P1: Urgent Review Rules (Bilingual English & Hindi)
     P1_RULES = [
         {
             "id": "RULE-P1-INF-01",
             "name": "Meningeal Irritation in Febrile Illness",
             "criterion": "High fever accompanied by neck stiffness or photophobia",
-            "pattern": r"(fever|high\s*temp).*(stiff.*neck|neck.*stiff|cannot\s*bend\s*neck|hurts\s*to\s*bend.*head)|(stiff.*neck|neck.*stiff).*(fever|temp)",
+            "pattern": r"(fever|high\s*temp|बुखार|bukhar).*(stiff.*neck|neck.*stiff|cannot\s*bend\s*neck|hurts\s*to\s*bend.*head|गर्दन\s*में\s*अकड़न|gardan\s*me\s*akad)|(stiff.*neck|neck.*stiff|गर्दन\s*में\s*अकड़न).*(fever|temp|बुखार|bukhar)",
             "action": "Urgent in-person physician assessment within 1 hour."
         },
         {
             "id": "RULE-P1-PAIN-02",
             "name": "Severe Uncontrolled Pain",
             "criterion": "Reported pain severity >= 8/10",
-            "pattern": r"(\b[89]|10)\s*(?:out\s*of\s*10|/10)|severe\s*unbearable\s*pain",
+            "pattern": r"(\b[89]|10)\s*(?:out\s*of\s*10|/10)|severe\s*unbearable\s*pain|असहनीय\s*दर्द|बहुत\s*तेज\s*दर्द|bahut\s*tez\s*dard",
             "action": "Urgent clinical review for acute pain etiology and analgesia."
         },
         {
             "id": "RULE-P1-ABD-03",
             "name": "Acute Abdomen with Intolerance",
             "criterion": "Severe abdominal pain with intractable vomiting or fever",
-            "pattern": r"(abdominal\s*pain|stomach\s*pain|belly\s*pain).*(vomit|throwing\s*up)|(vomit|throwing\s*up).*(abdominal\s*pain|stomach\s*pain)",
+            "pattern": r"(abdominal\s*pain|stomach\s*pain|belly\s*pain|पेट\s*में\s*दर्द|pet\s*me\s*dard).*(vomit|throwing\s*up|उल्टी|ulti)|(vomit|throwing\s*up|उल्टी).*(abdominal\s*pain|stomach\s*pain|पेट\s*में\s*दर्द)",
             "action": "Urgent surgical / abdominal workup within 2 hours."
         },
         {
             "id": "RULE-P1-RESP-04",
             "name": "Subacute Respiratory Distress",
             "criterion": "Shortness of breath with fever or cough, without immediate collapse",
-            "pattern": r"(shortness\s*of\s*breath|trouble\s*breathing).*(fever|cough)|(fever|cough).*(shortness\s*of\s*breath|trouble\s*breathing)",
+            "pattern": r"(shortness\s*of\s*breath|trouble\s*breathing|सांस\s*लेने\s*में\s*परेशानी).*(fever|cough|बुखार|खांसी)|(fever|cough|बुखार|खांसी).*(shortness\s*of\s*breath|trouble\s*breathing)",
             "action": "Urgent chest evaluation and pulse oximetry."
         }
     ]
@@ -107,6 +107,7 @@ class DeterministicTriageEngine:
     ) -> TriageResult:
         """
         Evaluates clinical evidence and generates a transparent, auditable TriageResult.
+        Combines deterministic protocol safety checks with MedGemma model-reasoned urgency signals.
         """
         # 1. Check for AI / System Failure
         if ai_status == "failed":
@@ -131,22 +132,37 @@ class DeterministicTriageEngine:
                 triage_rule_version=self.PROTOCOL_VERSION
             )
 
-        # Aggregate all text for pattern verification
         all_patient_text = " ".join(raw_messages).lower()
+        model_urgency_signals = evidence_state.get("urgency_signals", [])
 
         triggered_rules: List[TriageTrigger] = []
         warning_signs: List[str] = []
         reasons: List[str] = []
 
-        # 2. Evaluate P0 (Emergency) Rules FIRST
-        # Emergency triggers can NEVER be downgraded by absence of other symptoms.
+        # 2. Check Model-Reasoned Emergency Signals (MedGemma Semantic Red Flags)
+        for sig in model_urgency_signals:
+            if isinstance(sig, dict) and sig.get("severity_level") == "emergency":
+                sig_name = sig.get("signal", "Critical Red Flag")
+                sig_rationale = sig.get("rationale", "Emergency clinical marker identified by MedGemma")
+                sig_quote = sig.get("source_quote", "Reported in intake")
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-MODEL-01",
+                    rule_name=f"AI Clinical Red Flag: {sig_name}",
+                    priority="P0",
+                    criterion=sig_rationale,
+                    matched_evidence=f"Patient stated: '{sig_quote[:120]}'",
+                    action_protocol="Immediate clinical emergency escalation."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"AI Red Flag: {sig_name}")
+                reasons.append(f"AI identified emergency signal ({sig_name}): {sig_rationale}")
+
+        # 3. Check Protocol-Based P0 Emergency Rules
         for rule in self.P0_RULES:
             match = re.search(rule["pattern"], all_patient_text)
             if match:
                 matched_snippet = match.group(0)
-                # Find which message contained it
                 source_msg = next((msg for msg in raw_messages if matched_snippet in msg.lower()), matched_snippet)
-                
                 trigger = TriageTrigger(
                     rule_id=rule["id"],
                     rule_name=rule["name"],
@@ -171,7 +187,25 @@ class DeterministicTriageEngine:
                 triage_rule_version=self.PROTOCOL_VERSION
             )
 
-        # 3. Evaluate P1 (Urgent) Rules
+        # 4. Evaluate P1 (Urgent) Rules: Check Model-Reasoned Urgent Signals First
+        for sig in model_urgency_signals:
+            if isinstance(sig, dict) and sig.get("severity_level") == "urgent":
+                sig_name = sig.get("signal", "Urgent Condition")
+                sig_rationale = sig.get("rationale", "Urgent clinical acuity marker identified by MedGemma")
+                sig_quote = sig.get("source_quote", "Reported in intake")
+                trigger = TriageTrigger(
+                    rule_id="RULE-P1-MODEL-01",
+                    rule_name=f"AI Urgent Indicator: {sig_name}",
+                    priority="P1",
+                    criterion=sig_rationale,
+                    matched_evidence=f"Patient stated: '{sig_quote[:120]}'",
+                    action_protocol="Prompt clinical physician assessment within 1 to 2 hours."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"AI Urgent Flag: {sig_name}")
+                reasons.append(f"AI identified urgent signal ({sig_name}): {sig_rationale}")
+
+        # Evaluate Protocol-Based P1 Rules
         for rule in self.P1_RULES:
             match = re.search(rule["pattern"], all_patient_text)
             if match:

@@ -132,3 +132,52 @@ def test_api_reviewer_override_and_approval(client):
     reopen_resp = client.post(f"/cases/{case_id}/reopen")
     assert reopen_resp.status_code == 200
     assert reopen_resp.json()["review_status"] == "reopened"
+
+
+def test_api_upload_document_image(client):
+    """Verifies image upload and OCR text extraction."""
+    from io import BytesIO
+    from PIL import Image, ImageDraw
+
+    create_resp = client.post("/cases", json={"preferred_language": "English"})
+    case_id = create_resp.json()["id"]
+
+    img = Image.new("RGB", (300, 80), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.text((10, 25), "CLINICAL LAB REPORT: NORMAL", fill=(0, 0, 0))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    resp = client.post(
+        f"/cases/{case_id}/upload-document",
+        files={"file": ("test_report.png", buf.getvalue(), "image/png")}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["filename"] == "test_report.png"
+    assert "char_count" in data
+
+
+def test_api_upload_document_pdf(client):
+    """Verifies PDF document upload and text parsing."""
+    from io import BytesIO
+    from pypdf import PdfWriter
+
+    create_resp = client.post("/cases", json={"preferred_language": "Hindi"})
+    case_id = create_resp.json()["id"]
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    pdf_buf = BytesIO()
+    writer.write(pdf_buf)
+
+    resp = client.post(
+        f"/cases/{case_id}/upload-document",
+        files={"file": ("prescription.pdf", pdf_buf.getvalue(), "application/pdf")}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["filename"] == "prescription.pdf"

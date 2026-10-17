@@ -110,4 +110,10 @@ class CareFlowAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    def upload_document(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
+        files = {"file": (filename, file_bytes)}
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/upload-document", files=files, timeout=40)
+        resp.raise_for_status()
+        return resp.json()
+
 api_client = CareFlowAPIClient()
