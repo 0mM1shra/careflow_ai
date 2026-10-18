@@ -136,3 +136,24 @@ def test_hosted_transcription_groq_and_hf_mocked():
                 assert res is not None
                 assert "chest pressure" in res.transcript
                 assert res.model_size == "hosted-huggingface"
+
+    # Test auto-routing when WHISPER_ENDPOINT is Groq but user provides an hf_ token in WHISPER_API_KEY
+    with patch.object(settings, "WHISPER_ENDPOINT", "https://api.groq.com/openai/v1/audio/transcriptions"):
+        with patch.object(settings, "WHISPER_API_KEY", "hf_my_secret_token"):
+            with patch("requests.post") as mock_post:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = [{"text": "Automatic routing worked"}]
+                mock_post.return_value = mock_resp
+
+                res = service._hosted_transcribe(
+                    file_bytes=fake_audio,
+                    filename="voice.wav",
+                    language="English"
+                )
+                assert res is not None
+                assert res.transcript == "Automatic routing worked"
+                # Check that request was sent to router.huggingface.co instead of api.groq.com
+                call_url = mock_post.call_args[0][0]
+                assert "router.huggingface.co" in call_url
+

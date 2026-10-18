@@ -258,14 +258,37 @@ class TranscriptionService:
         model_size: Optional[str] = None
     ) -> Optional[TranscriptionResult]:
         """Calls a hosted Whisper endpoint (Groq Cloud whisper-large-v3, Hugging Face, or OpenAI)."""
-        endpoint = settings.WHISPER_ENDPOINT
-        api_key = settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN
+        raw_key = (settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN or "").strip()
+        endpoint = (settings.WHISPER_ENDPOINT or "").strip()
 
-        # Auto-route to Hugging Face Whisper-large-v3 if user has HF_TOKEN but no Groq key
-        if not (settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY")) and settings.HF_TOKEN:
-            if not endpoint or "groq.com" in endpoint:
+        # Discover HF token across all possible env vars
+        hf_token = (
+            settings.HF_TOKEN
+            or (raw_key if raw_key.startswith("hf_") else None)
+            or (settings.MEDGEMMA_API_KEY if settings.MEDGEMMA_API_KEY and settings.MEDGEMMA_API_KEY.startswith("hf_") else None)
+            or ""
+        ).strip()
+
+        groq_key = (
+            (raw_key if raw_key.startswith("gsk_") else None)
+            or os.getenv("GROQ_API_KEY")
+            or ""
+        ).strip()
+
+        # Intelligent API auto-routing:
+        # Case A: User supplied a Hugging Face token (starts with 'hf_' or HF_TOKEN is provided without a Groq key)
+        if (raw_key and raw_key.startswith("hf_")) or (hf_token and not groq_key):
+            api_key = hf_token or raw_key
+            # Route to live Hugging Face router if endpoint is empty, points to Groq, or uses legacy HF host
+            if not endpoint or "groq.com" in endpoint or "api-inference.huggingface.co" in endpoint:
                 endpoint = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3"
-            api_key = settings.HF_TOKEN
+        # Case B: Groq key provided or standard OpenAI-compatible key
+        elif groq_key or (raw_key and not raw_key.startswith("hf_")):
+            api_key = groq_key or raw_key
+            if not endpoint or "huggingface.co" in endpoint:
+                endpoint = "https://api.groq.com/openai/v1/audio/transcriptions"
+        else:
+            api_key = raw_key
 
         # Automatically rewrite deprecated Hugging Face domain if configured
         if endpoint and "api-inference.huggingface.co" in endpoint:
@@ -305,12 +328,18 @@ class TranscriptionService:
             if "huggingface.co" in endpoint:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
-                    "Content-Type": mime_type
+                    "Content-Type": mime_type,
+                    "x-wait-for-model": "true"
                 }
-                resp = requests.post(endpoint, headers=headers, data=file_bytes, timeout=35)
+                resp = requests.post(endpoint, headers=headers, data=file_bytes, timeout=45)
                 if resp.status_code == 200:
                     res_data = resp.json()
-                    text = res_data.get("text", "").strip() if isinstance(res_data, dict) else str(res_data).strip()
+                    if isinstance(res_data, dict):
+                        text = res_data.get("text", "").strip()
+                    elif isinstance(res_data, list) and len(res_data) > 0 and isinstance(res_data[0], dict):
+                        text = res_data[0].get("text", "").strip()
+                    else:
+                        text = str(res_data).strip()
                     if text:
                         return TranscriptionResult(
                             transcript=text,
