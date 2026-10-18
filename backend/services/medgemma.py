@@ -284,10 +284,10 @@ class MedGemmaService:
 
         # Symptom detection (Multilingual: English, Hindi, Hinglish)
         symptom_patterns = [
-            ("chest pain", ["chest pain", "pressure in chest", "chest tightness", "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain"]),
+            ("chest pain", ["chest pain", "pressure in chest", "chest tightness", "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain", "dil me dard", "dil me bahut dard", "dil me pain", "दिल में दर्द", "lower chest is paining", "tightness in chest"]),
             ("shortness of breath", ["shortness of breath", "trouble breathing", "dyspnea", "breathless", "सांस लेने में तकलीफ", "दम फूलना", "सांस फूलना", "saans lene me takleef", "dam phoolna"]),
             ("fever", ["fever", "high temperature", "chills", "feeling hot", "बुखार", "तेज बुखार", "bukhar", "taap"]),
-            ("headache", ["headache", "migraine", "head throbbing", "head pain", "सिरदर्द", "सिर में दर्द", "sir dard", "sar me dard"]),
+            ("headache", ["headache", "migraine", "head throbbing", "head pain", "सिरदर्द", "सिर में दर्द", "sir dard", "sar me dard", "shar dard", "sar dard", "high headahed", "headahed"]),
             ("cough", ["cough", "coughing", "खांसी", "khansi"]),
             ("sore throat", ["sore throat", "throat hurts", "गले में खराश", "गले में दर्द", "gale me dard", "gala kharab"]),
             ("abdominal pain", ["abdominal pain", "stomach ache", "belly pain", "stomach pain", "पेट में दर्द", "पेट दर्द", "pet dard", "pet me dard"]),
@@ -322,7 +322,7 @@ class MedGemmaService:
         for pt in patient_texts:
             pt_l = pt.lower()
             # Emergency: Acute Coronary / Cardiopulmonary / Stroke signs
-            if any(term in pt_l for term in ["chest pain", "crushing", "radiat", "सीने में दर्द", "बाएं हाथ", "छाती में दर्द"]) and any(r in pt_l for r in ["arm", "jaw", "neck", "बाएं हाथ", "गर्दन"]):
+            if any(term in pt_l for term in ["chest pain", "crushing", "radiat", "सीने में दर्द", "बाएं हाथ", "छाती में दर्द", "dil me"]) and any(r in pt_l for r in ["arm", "jaw", "neck", "बाएं हाथ", "गर्दन", "gardan", "haath"]):
                 urgency_signals.append({
                     "signal": "Acute Coronary Syndrome Red Flag",
                     "severity_level": "emergency",
@@ -343,6 +343,18 @@ class MedGemmaService:
                     "rationale": "Focal acute neurological symptoms indicate potential cerebrovascular accident / stroke.",
                     "source_quote": pt
                 })
+            # Urgent: Acute Central Chest Discomfort / Anginal Equivalent without radiation
+            elif any(term in pt_l for term in [
+                "chest pain", "pressure in chest", "chest tightness", "tightness in chest", "lower chest is paining",
+                "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain",
+                "dil me dard", "dil me bahut dard", "dil me pain", "दिल में दर्द"
+            ]):
+                urgency_signals.append({
+                    "signal": "Acute Central Chest Discomfort",
+                    "severity_level": "urgent",
+                    "rationale": "Acute chest pain, pressure, or tightness warrants urgent clinical physician evaluation and ECG.",
+                    "source_quote": pt
+                })
             # Urgent: Meningeal signs / High Fever + Stiff neck
             elif (any(f in pt_l for f in ["fever", "बुखार", "bukhar", "high temp"]) and any(s in pt_l for s in ["stiff", "neck", "गर्दन में अकड़न", "gardan akad"])) or "stiff neck" in pt_l:
                 urgency_signals.append({
@@ -352,7 +364,13 @@ class MedGemmaService:
                     "source_quote": pt
                 })
             # Urgent: Severe Pain >= 8/10
-            elif any(p in pt_l for p in ["8/10", "9/10", "10/10", "8 out of 10", "9 out of 10", "10 out of 10", "असहनीय दर्द", "बहुत तेज दर्द"]):
+            elif (
+                any(p in pt_l for p in ["8/10", "9/10", "10/10", "8 out of 10", "9 out of 10", "10 out of 10", "असहनीय दर्द", "बहुत तेज दर्द", "bahut tez dard", "bahut shar dard", "bahut sar dard"]) or
+                re.match(r"^\s*([89]|10)\s*(?:/10|out of 10)?\s*$", pt_l) or
+                re.search(r"\b(?:pain|severity|scale|level|dard|rating)\s*(?:is|=|:)?\s*([89]|10)\b", pt_l) or
+                re.search(r"\b([89]|10)\s*(?:pain|severity|level|rating|dard)\b", pt_l) or
+                any(w in pt_l for w in ["severe pain", "unbearable pain", "very high chest pain", "excruciating", "extreme pain"])
+            ):
                 urgency_signals.append({
                     "signal": "Severe Acute Pain Acuity",
                     "severity_level": "urgent",
@@ -418,9 +436,12 @@ class MedGemmaService:
 
         # Check severity
         severity_match = re.search(r"(\b[1-9]|10)\s*(?:out of 10|/10)", full_text)
+        single_num_match = next((pt.strip() for pt in patient_texts if pt.strip() in [str(i) for i in range(1, 11)]), None)
         if severity_match:
             severity = f"{severity_match.group(1)}/10"
-        elif any(w in full_text for w in ["severe", "असहनीय", "बहुत तेज", "bahut tez", "tez dard", "asahniya"]):
+        elif single_num_match:
+            severity = f"{single_num_match}/10"
+        elif any(w in full_text for w in ["severe", "unbearable", "very high", "extreme", "excruciating", "असहनीय", "बहुत तेज", "bahut tez", "tez dard", "bahut dard", "asahniya"]):
             severity = "Severe"
         elif any(w in full_text for w in ["mild", "हल्का", "halka", "kam dard"]):
             severity = "Mild"

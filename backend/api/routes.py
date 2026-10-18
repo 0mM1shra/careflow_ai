@@ -72,12 +72,30 @@ def health_check(db: Session = Depends(get_db)):
 def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     """Creates a new patient intake case with a random, non-identifying ID."""
     case_id = _generate_case_id()
+    init_priority = "P3"
+    init_reasons = []
+    init_missing = []
+    init_uncertainties = []
+    if req.chief_complaint and req.chief_complaint.strip():
+        initial_triage = triage_engine.evaluate(
+            evidence_state={"facts": {"chief_complaint": req.chief_complaint.strip()}},
+            raw_messages=[req.chief_complaint.strip()],
+            ai_status="ready"
+        )
+        init_priority = initial_triage.priority_category
+        init_reasons = initial_triage.reasons
+        init_missing = initial_triage.missing_information
+        init_uncertainties = initial_triage.uncertainties
+
     new_case = Case(
         id=case_id,
         preferred_language=req.preferred_language,
         chief_complaint=req.chief_complaint,
         ai_status="pending",
-        priority_category="P3",
+        priority_category=init_priority,
+        priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
+        missing_information_json=json.dumps(init_missing) if init_missing else None,
+        uncertainties_json=json.dumps(init_uncertainties) if init_uncertainties else None,
         review_status="pending",
         triage_rule_version=settings.TRIAGE_RULE_VERSION,
         created_at=datetime.utcnow(),
@@ -89,7 +107,11 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     audit = AuditEvent(
         case_id=case_id,
         event_type="case_created",
-        new_value_json=json.dumps({"preferred_language": req.preferred_language, "chief_complaint": req.chief_complaint}),
+        new_value_json=json.dumps({
+            "preferred_language": req.preferred_language,
+            "chief_complaint": req.chief_complaint,
+            "initial_priority": init_priority
+        }),
         reason="Patient initiated new intake session",
         actor_role="patient",
         created_at=datetime.utcnow()
@@ -315,15 +337,26 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         ai_status=case.ai_status
     )
     
-    # If P0 is triggered immediately, update case priority so emergency alerts trigger
-    if triage_res.priority_category == "P0":
+    # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
+    new_p = triage_res.priority_category
+    curr_p = case.priority_category
+
+    if curr_p == "P0" or new_p == "P0":
         case.priority_category = "P0"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
-    elif triage_res.priority_category == "P1" and case.priority_category != "P0":
+    elif curr_p == "P1" or new_p == "P1":
         case.priority_category = "P1"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
+    elif curr_p == "P2" or new_p == "P2":
+        case.priority_category = "P2"
+    elif new_p == "ERR" or case.ai_status == "failed":
+        case.priority_category = "ERR"
+    else:
+        case.priority_category = new_p
+
+    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    case.missing_information_json = json.dumps(triage_res.missing_information)
+    case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    case.updated_at = datetime.utcnow()
+    db.commit()
 
     return {
         "status": "success",
@@ -414,14 +447,26 @@ async def upload_medical_document(
         raw_messages=all_msgs,
         ai_status=case.ai_status
     )
-    if triage_res.priority_category == "P0":
+    # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
+    new_p = triage_res.priority_category
+    curr_p = case.priority_category
+
+    if curr_p == "P0" or new_p == "P0":
         case.priority_category = "P0"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
-    elif triage_res.priority_category == "P1" and case.priority_category != "P0":
+    elif curr_p == "P1" or new_p == "P1":
         case.priority_category = "P1"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
+    elif curr_p == "P2" or new_p == "P2":
+        case.priority_category = "P2"
+    elif new_p == "ERR" or case.ai_status == "failed":
+        case.priority_category = "ERR"
+    else:
+        case.priority_category = new_p
+
+    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    case.missing_information_json = json.dumps(triage_res.missing_information)
+    case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    case.updated_at = datetime.utcnow()
+    db.commit()
 
     return {
         "status": "success",
@@ -528,6 +573,9 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
             final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
         elif existing_p == "P1" and final_priority in ("P2", "P3"):
             final_priority = "P1"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+        elif existing_p == "P2" and final_priority == "P3" and (triage_res.uncertainties or evidence_st.get("contradictions")):
+            final_priority = "P2"
             final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
 
     case.priority_category = final_priority

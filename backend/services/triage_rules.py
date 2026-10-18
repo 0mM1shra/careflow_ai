@@ -79,9 +79,16 @@ class DeterministicTriageEngine:
         {
             "id": "RULE-P1-PAIN-02",
             "name": "Severe Uncontrolled Pain",
-            "criterion": "Reported pain severity >= 8/10",
-            "pattern": r"(\b[89]|10)\s*(?:out\s*of\s*10|/10)|severe\s*unbearable\s*pain|असहनीय\s*दर्द|बहुत\s*तेज\s*दर्द|bahut\s*tez\s*dard",
+            "criterion": "Reported pain severity >= 8/10 or severe/unbearable pain",
+            "pattern": r"(?:\b([89]|10)\s*(?:out\s*of\s*10|/10|\s*/\s*10|out\s*of\s*ten)\b|\b(?:pain|severity|scale|level|dard|rating)\s*(?:is|=|:)?\s*([89]|10)\b|\b([89]|10)\s*(?:pain|severity|level|rating|dard)\b|(?:severe|unbearable|very\s*high|high|extreme|excruciating)\s+(?:pain|headache|headahed|chest\s*pain|abdominal\s*pain|stomach\s*pain|back\s*pain|cramps|ache)|severe\s*unbearable\s*pain|unbearable\s*pain|excruciating\s*pain|असहनीय\s*दर्द|बहुत\s*(?:ज़्यादा|ज्यादा|तेज़|तेज)\s*दर्द|बहुत\s*(?:shar\s*|sar\s*|sir\s*)?dard|bahut\s*(?:zyada\s*|jada\s*|tez\s*)?(?:shar\s*|sar\s*|sir\s*)?dard)",
             "action": "Urgent clinical review for acute pain etiology and analgesia."
+        },
+        {
+            "id": "RULE-P1-CARD-05",
+            "name": "Acute Central Chest Pain or Pressure",
+            "criterion": "New or acute chest pain, tightness, or cardiac discomfort without confirmed radiation",
+            "pattern": r"(chest\s*pain|pressure\s*in\s*chest|chest\s*tightness|tightness\s*in\s*(?:my\s*)?chest|lower\s*chest\s*is\s*paining|सीने\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव|भारी)|छाती\s*में\s*(?:.{0,25}?)(?:दर्द|दबाव)|सीना\s*भारी|chhati\s*me\s*(?:.{0,25}?)(?:dard|dabav)|seene\s*me\s*(?:.{0,25}?)(?:dard|dabav)|dil\s*me\s*(?:.{0,25}?)(?:dard|pain)|दिल\s*में\s*(?:.{0,25}?)(?:दर्द))",
+            "action": "Urgent clinical and ECG evaluation within 30-60 minutes."
         },
         {
             "id": "RULE-P1-ABD-03",
@@ -224,6 +231,38 @@ class DeterministicTriageEngine:
                 warning_signs.append(f"{rule['name']}: {rule['criterion']}")
                 reasons.append(f"Triggered {rule['id']} ({rule['name']}): '{source_msg[:90]}'")
 
+        # Check if patient directly provided standalone severe pain score (e.g. answering severity question with '8', '9', '10')
+        standalone_high_pain = [msg.strip() for msg in raw_messages if msg.strip() in ("8", "9", "10", "8/10", "9/10", "10/10", "10 out of 10", "9 out of 10", "8 out of 10")]
+        if standalone_high_pain and not any(t.rule_id == "RULE-P1-PAIN-02" for t in triggered_rules):
+            trigger = TriageTrigger(
+                rule_id="RULE-P1-PAIN-02",
+                rule_name="Severe Uncontrolled Pain",
+                priority="P1",
+                criterion="Reported pain severity >= 8/10",
+                matched_evidence=f"Patient reported pain score: '{standalone_high_pain[-1]}'",
+                action_protocol="Urgent clinical review for acute pain etiology and analgesia."
+            )
+            triggered_rules.append(trigger)
+            warning_signs.append("Severe Uncontrolled Pain: Reported pain severity >= 8/10")
+            reasons.append(f"Triggered RULE-P1-PAIN-02 (Severe Uncontrolled Pain): '{standalone_high_pain[-1]}'")
+
+        # Check structured severity fact in evidence_state
+        facts = evidence_state.get("facts", {})
+        sev_fact = facts.get("severity", {})
+        sev_val = str(sev_fact.get("value", "") if isinstance(sev_fact, dict) else sev_fact).lower()
+        if (any(term in sev_val for term in ["8/10", "9/10", "10/10", "severe", "unbearable", "very high"]) or sev_val in ["8", "9", "10"]) and not any(t.rule_id == "RULE-P1-PAIN-02" for t in triggered_rules):
+            trigger = TriageTrigger(
+                rule_id="RULE-P1-PAIN-02",
+                rule_name="Severe Uncontrolled Pain",
+                priority="P1",
+                criterion="Extracted pain severity >= 8/10 or severe",
+                matched_evidence=f"Evidence fact severity: '{sev_val}'",
+                action_protocol="Urgent clinical review for acute pain etiology and analgesia."
+            )
+            triggered_rules.append(trigger)
+            warning_signs.append("Severe Uncontrolled Pain: Extracted pain severity >= 8/10 or severe")
+            reasons.append(f"Triggered RULE-P1-PAIN-02 (Severe Uncontrolled Pain): Severity fact '{sev_val}'")
+
         if triggered_rules:
             return TriageResult(
                 priority_category="P1",
@@ -237,10 +276,11 @@ class DeterministicTriageEngine:
             )
 
         # 4. Evaluate P2 (Incomplete or Uncertain)
-        # Check for contradictions, unresolved uncertainties, or severe symptoms without timeline
+        # Check for contradictions, unresolved uncertainties, or multiple unknown dimensions
         contradictions = evidence_state.get("contradictions", [])
         uncertainties = evidence_state.get("uncertainties", [])
         missing_info = evidence_state.get("missing_information", [])
+        unknowns = evidence_state.get("unknown_information", [])
 
         p2_triggers = []
         if contradictions:
@@ -256,18 +296,31 @@ class DeterministicTriageEngine:
             )
             reasons.append(f"Contradictory information present: {'; '.join(contradictions)}")
 
-        if uncertainties and len(uncertainties) >= 2:
+        if uncertainties:
             p2_triggers.append(
                 TriageTrigger(
                     rule_id="RULE-P2-UNCERTAIN-02",
                     rule_name="High Clinical Uncertainty",
                     priority="P2",
-                    criterion="Multiple ambiguous or uncertain patient reports",
+                    criterion="Ambiguous or uncertain patient reports requiring clinical clarification",
                     matched_evidence="; ".join(uncertainties),
                     action_protocol="Reviewer clarification required."
                 )
             )
             reasons.append(f"High clinical uncertainty: {'; '.join(uncertainties)}")
+
+        if len(unknowns) >= 2:
+            p2_triggers.append(
+                TriageTrigger(
+                    rule_id="RULE-P2-INCOMPLETE-03",
+                    rule_name="Multiple Unknown Clinical Dimensions",
+                    priority="P2",
+                    criterion="Multiple key clinical dimensions marked unknown or skipped",
+                    matched_evidence="; ".join(unknowns),
+                    action_protocol="Clinician callback to complete missing clinical intake history."
+                )
+            )
+            reasons.append(f"Multiple unknown clinical dimensions: {len(unknowns)} skipped/unknown items")
 
         if p2_triggers:
             return TriageResult(
