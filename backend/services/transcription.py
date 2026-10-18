@@ -261,7 +261,14 @@ class TranscriptionService:
     ) -> Optional[TranscriptionResult]:
         """Calls a hosted Whisper endpoint (Groq Cloud whisper-large-v3, Hugging Face, or OpenAI)."""
         endpoint = settings.WHISPER_ENDPOINT
-        api_key = settings.WHISPER_API_KEY or settings.HF_TOKEN
+        api_key = settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN
+
+        # Auto-route to Hugging Face Whisper-large-v3 if user has HF_TOKEN but no Groq key
+        if not (settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY")) and settings.HF_TOKEN:
+            if not endpoint or "groq.com" in endpoint:
+                endpoint = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3"
+            api_key = settings.HF_TOKEN
+
         if not endpoint or not api_key:
             return None
 
@@ -278,6 +285,17 @@ class TranscriptionService:
             )
         )
 
+        ext = filename.lower().split(".")[-1] if "." in filename else "wav"
+        mime_map = {
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "m4a": "audio/m4a",
+            "ogg": "audio/ogg",
+            "webm": "audio/webm",
+            "flac": "audio/flac"
+        }
+        mime_type = mime_map.get(ext, "audio/wav")
+
         try:
             import requests
 
@@ -285,7 +303,7 @@ class TranscriptionService:
             if "huggingface.co" in endpoint:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "audio/wav"
+                    "Content-Type": mime_type
                 }
                 resp = requests.post(endpoint, headers=headers, data=file_bytes, timeout=35)
                 if resp.status_code == 200:
@@ -309,17 +327,6 @@ class TranscriptionService:
             # Case 2: OpenAI / Groq compatible endpoint (multipart/form-data)
             headers = {"Authorization": f"Bearer {api_key}"}
             model_name = getattr(settings, "WHISPER_MODEL", "whisper-large-v3") or "whisper-large-v3"
-
-            ext = filename.lower().split(".")[-1] if "." in filename else "wav"
-            mime_map = {
-                "mp3": "audio/mpeg",
-                "wav": "audio/wav",
-                "m4a": "audio/m4a",
-                "ogg": "audio/ogg",
-                "webm": "audio/webm",
-                "flac": "audio/flac"
-            }
-            mime_type = mime_map.get(ext, "audio/wav")
 
             files = {"file": (filename, file_bytes, mime_type)}
             data = {
