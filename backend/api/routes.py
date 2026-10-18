@@ -257,11 +257,15 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     if not case:
         raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
 
+    content_clean = req.content.strip() if req.content else ""
+    if not content_clean:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty or whitespace only.")
+
     # Store verbatim message in SQLite with modality provenance
     msg = Message(
         case_id=case_id,
         role="patient",
-        content=req.content.strip(),
+        content=content_clean,
         source_type=req.source_type or "patient_typed",
         source_language=req.source_language,
         transcription_confidence=req.transcription_confidence,
@@ -274,7 +278,7 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
     # Set chief complaint if empty
     if not case.chief_complaint:
-        case.chief_complaint = req.content.strip()
+        case.chief_complaint = content_clean
 
     # Collect all patient messages so far
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
@@ -291,11 +295,16 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
             actor_role="ai_system"
         )
         case.ai_status = "ready"
+        db.commit()
     except Exception as e:
         logger.error(f"Error during extraction for case {case_id}: {e}")
-        case.ai_status = "failed"
-        case.priority_category = "ERR"
-        db.commit()
+        db.rollback()
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.ai_status = "failed"
+            case.priority_category = "ERR"
+            case.priority_reasons_json = json.dumps([f"Clinical extraction error: {type(e).__name__}"])
+            db.commit()
 
     # Interim Red-Flag Check: Emergency warning must NOT be delayed while questioning continues
     current_evidence = json.loads(case.evidence_state_json or "{}")
@@ -386,11 +395,16 @@ async def upload_medical_document(
             actor_role="ai_system"
         )
         case.ai_status = "ready"
+        db.commit()
     except Exception as e:
         logger.error(f"Error during extraction for uploaded document in case {case_id}: {e}")
-        case.ai_status = "failed"
-        case.priority_category = "ERR"
-        db.commit()
+        db.rollback()
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.ai_status = "failed"
+            case.priority_category = "ERR"
+            case.priority_reasons_json = json.dumps([f"Document extraction error: {type(e).__name__}"])
+            db.commit()
 
     # Interim Red-Flag Check
     current_evidence = json.loads(case.evidence_state_json or "{}")

@@ -110,7 +110,7 @@ MEDGEMMA_LOCAL_QUANTIZATION=4bit
 
 ## 5. Running Automated Verification Tests
 
-Verify all 52 unit, integration, and safety regression tests:
+Verify all 62 unit, integration, safety regression, and multimodal intake tests:
 
 ```powershell
 # Run the complete test suite
@@ -119,10 +119,11 @@ pytest -v
 
 Expected result:
 ```
-====================== 52 passed in 1.15s =======================
+====================== 62 passed in ~4s =======================
 ```
 
 ### Test Suite Breakdown:
+- `tests/test_intake_500_and_voice.py`: HTTP 500 regression verification (`messages.source_type` dynamic SQLite migration), empty/whitespace message 400 validation, English/Hindi/Hinglish message ingestion, model extraction failure clean rollback, faster-whisper (`base` and `tiny`) transcription, PyAV compatibility, and complete end-to-end multimodal patient & reviewer journey.
 - `tests/test_safety_fixes.py`: Fabricated denial prevention, interim P1 persistence, upload actor attribution.
 - `tests/test_multilingual.py`: English, Devanagari Hindi, and Hinglish denials, durations, severities, and cross-lingual contradictions.
 - `tests/test_transcription.py`: `/transcribe-audio` endpoint, format validation, size limit enforcement, temp file cleanup.
@@ -238,3 +239,6 @@ CareFlow automatically uses `PaddleOCR` as a multilingual fallback when availabl
 ### Q: How to ensure model downloads don't fill drive C:
 Set `$env:HF_HOME = "D:\huggingface"` in PowerShell before starting the backend or running scripts.
 CareFlow automatically passes `HF_HOME` to Hugging Face Hub.
+
+### Q: PyAV `metadata_errors` or OpenMP conflict on Windows 11
+CareFlow's `TranscriptionService` includes an automated compatibility patch that resolves the PyAV >= 14 `metadata_errors` deprecation when running `faster-whisper`. Additionally, CPU thread isolation prevents runtime collisions between `faster-whisper` (CTranslate2) and `PaddleOCR` (PaddlePaddle).

@@ -57,13 +57,15 @@ class CareFlowAPIClient:
         source_type: str = "patient_typed",
         source_language: Optional[str] = None,
         confidence: Optional[float] = None,
+        transcription_confidence: Optional[float] = None,
         is_confirmed: bool = True
     ) -> Dict[str, Any]:
+        conf = transcription_confidence if transcription_confidence is not None else confidence
         payload = {
             "content": content,
             "source_type": source_type,
             "source_language": source_language,
-            "transcription_confidence": confidence,
+            "transcription_confidence": conf,
             "is_confirmed": is_confirmed
         }
         resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=20)

@@ -20,6 +20,27 @@ class TranscriptionError(Exception):
     pass
 
 
+def _patch_pyav_metadata_errors_compat():
+    """
+    PyAV >= 14.0 removed the 'metadata_errors' parameter from av.open().
+    faster-whisper passes metadata_errors='ignore', causing a TypeError.
+    This compatibility patch safely strips metadata_errors when PyAV is imported.
+    """
+    try:
+        import av
+        if not getattr(av, "_careflow_compat_patched", False):
+            orig_open = av.open
+
+            def _compat_open(*args, **kwargs):
+                kwargs.pop("metadata_errors", None)
+                return orig_open(*args, **kwargs)
+
+            av.open = _compat_open
+            av._careflow_compat_patched = True
+    except Exception:
+        pass
+
+
 class TranscriptionService:
     """
     Local Audio Transcription Service supporting faster-whisper.
@@ -35,6 +56,7 @@ class TranscriptionService:
 
     def __init__(self):
         self._models: Dict[str, Any] = {}
+        _patch_pyav_metadata_errors_compat()
 
     def get_supported_models(self) -> List[str]:
         return ["base", "tiny"]
@@ -69,6 +91,24 @@ class TranscriptionService:
         except Exception as e:
             raise TranscriptionError(f"Failed to initialize faster-whisper model '{model_size}': {e}")
 
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        """Normalizes UI language strings ('Hindi', 'English', 'Hinglish', 'auto') to Whisper ISO codes or None."""
+        if not language:
+            return None
+        cleaned = language.strip().lower()
+        if cleaned in ("", "auto", "detect", "automatic", "none", "null"):
+            return None
+        mapping = {
+            "english": "en",
+            "en": "en",
+            "eng": "en",
+            "hindi": "hi",
+            "hi": "hi",
+            "hin": "hi",
+            "hinglish": None,  # Hinglish uses mixed code, best detected automatically or handled without language lock
+        }
+        return mapping.get(cleaned, cleaned)
+
     def transcribe_audio(
         self,
         file_bytes: bytes,
@@ -98,19 +138,31 @@ class TranscriptionService:
             model_size = "base"
         device = (device or settings.ASR_DEVICE).lower()
 
-        # Check if we should use mock transcription
-        use_mock = (settings.MEDGEMMA_MODE == "mock")
-        if not use_mock:
-            try:
-                import faster_whisper
-            except ImportError:
-                use_mock = True
+        # Check if unit test synthetic mock transcript is present
+        if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
 
+        # Determine execution mode: mock, local, or auto
+        asr_mode = getattr(settings, "ASR_MODE", "auto").lower()
+        use_mock = (asr_mode == "mock") or (asr_mode == "auto" and settings.MEDGEMMA_MODE == "mock")
         if use_mock:
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # Check for faster-whisper availability
+        try:
+            import faster_whisper
+        except ImportError:
+            if asr_mode == "local":
+                raise TranscriptionError(
+                    "faster-whisper is not installed. Run 'pip install faster-whisper' "
+                    "or set ASR_MODE=mock for testing."
+                )
+            logger.warning("faster-whisper not installed; falling back to mock transcription.")
             return self._mock_transcribe(file_bytes, filename, language, model_size)
 
         # Real faster-whisper execution
         whisper_model = self._get_whisper_model(model_size, device)
+        normalized_lang = self._normalize_language(language)
 
         # Create temporary file for audio
         temp_dir = settings.CAREFLOW_TEMP_DIR if settings.CAREFLOW_TEMP_DIR else None
@@ -123,7 +175,7 @@ class TranscriptionService:
 
             segments_generator, info = whisper_model.transcribe(
                 temp_path,
-                language=language if language and language != "auto" else None,
+                language=normalized_lang,
                 beam_size=5,
                 vad_filter=True
             )
@@ -205,14 +257,15 @@ class TranscriptionService:
             except Exception:
                 pass
 
+        norm_l = self._normalize_language(language)
         # Check for scenario markers in filename for deterministic testing
         if "cardiac" in fname_lower or "chest" in fname_lower:
             text = "I have severe crushing chest pain radiating to my left arm."
             lang = "en"
-        elif "fever_hindi" in fname_lower or "hindi" in fname_lower or language == "hi":
+        elif "fever_hindi" in fname_lower or "hindi" in fname_lower or norm_l == "hi":
             text = "मुझे दो दिन से बहुत तेज बुखार है और सिर में दर्द है।"
             lang = "hi"
-        elif "hinglish" in fname_lower:
+        elif "hinglish" in fname_lower or (language and "hinglish" in language.lower()):
             text = "mujhe kal se pet me dard ho raha hai aur ulti jaisa lag raha hai."
             lang = "hi"
         elif "noisy" in fname_lower:
