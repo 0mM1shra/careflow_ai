@@ -30,8 +30,10 @@ class Settings:
     ASR_MODE: str = os.getenv("ASR_MODE", "auto").lower()              # 'auto', 'local', 'mock', 'hosted'
     ASR_MODEL_SIZE: str = os.getenv("ASR_MODEL_SIZE", "base").lower()  # 'base', 'tiny', 'small'
     ASR_DEVICE: str = os.getenv("ASR_DEVICE", "cpu").lower()            # 'cpu' or 'cuda'
-    WHISPER_ENDPOINT: str = os.getenv("WHISPER_ENDPOINT", "")          # Optional hosted Whisper API
-    WHISPER_API_KEY: str = os.getenv("WHISPER_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    WHISPER_ENDPOINT: str = os.getenv("WHISPER_ENDPOINT", "https://api.groq.com/openai/v1/audio/transcriptions")
+    WHISPER_API_KEY: str = os.getenv("WHISPER_API_KEY", os.getenv("GROQ_API_KEY", os.getenv("OPENAI_API_KEY", "")))
+    WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "whisper-large-v3")
+    HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
     # OCR Engine Configuration: 'auto', 'winocr', 'paddleocr'
     OCR_ENGINE: str = os.getenv("OCR_ENGINE", "auto").lower()

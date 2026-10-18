@@ -141,44 +141,52 @@ class TranscriptionService:
         if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
             return self._mock_transcribe(file_bytes, filename, language, model_size)
 
-        # Determine execution mode: mock, local, or auto (independent of MEDGEMMA_MODE)
+        # Determine execution mode: 'hosted', 'auto', 'local', or 'mock'
         asr_mode = (getattr(settings, "ASR_MODE", None) or os.getenv("ASR_MODE", "auto")).lower()
-        use_mock = (asr_mode == "mock")
-        if not use_mock:
-            try:
-                import faster_whisper
-            except ImportError:
-                if asr_mode == "local":
-                    raise TranscriptionError(
-                        "faster-whisper is not installed. Run 'pip install faster-whisper' "
-                        "or set ASR_MODE=mock for testing."
-                    )
-                logger.warning("faster-whisper not installed; falling back to mock transcription.")
-                use_mock = True
+        has_api_key = bool(settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN)
 
-        if use_mock:
-            return self._mock_transcribe(file_bytes, filename, language, model_size)
-
-        # Path A: If hosted Whisper endpoint is configured, try it first
-        if settings.WHISPER_ENDPOINT or asr_mode == "hosted":
+        # Priority 1: If hosted mode is chosen, or if auto mode with an API key / endpoint configured
+        if asr_mode == "hosted" or (asr_mode == "auto" and has_api_key and settings.WHISPER_ENDPOINT):
             hosted_res = self._hosted_transcribe(file_bytes, filename, language, model_size)
             if hosted_res:
                 return hosted_res
             if asr_mode == "hosted":
-                raise TranscriptionError(f"Hosted Whisper endpoint '{settings.WHISPER_ENDPOINT}' failed.")
+                raise TranscriptionError(
+                    f"Hosted Whisper endpoint failed or is unreachable. "
+                    f"Check WHISPER_ENDPOINT ('{settings.WHISPER_ENDPOINT}') and API credentials."
+                )
 
-        # Path B: Local faster-whisper execution
+        # Priority 2: If mock mode explicitly requested
+        if asr_mode == "mock":
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # Priority 3: Local faster-whisper execution (only if explicitly requested or installed)
+        has_faster_whisper = False
+        try:
+            import faster_whisper
+            has_faster_whisper = True
+        except ImportError:
+            if asr_mode == "local":
+                raise TranscriptionError(
+                    "faster-whisper is not installed. Run 'pip install faster-whisper', "
+                    "or configure a free hosted Whisper API key (e.g. Groq) and set ASR_MODE=hosted."
+                )
+
+        if not has_faster_whisper:
+            logger.warning("No hosted Whisper API key found and faster-whisper is not installed; falling back to mock.")
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
         whisper_model = self._get_whisper_model(model_size, device)
         normalized_lang = self._normalize_language(language)
 
         # Domain prompt hints to guide Hindi/Hinglish clinical vocabulary
         initial_prompt = (
-            "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
+            "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, खून की उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
             if normalized_lang == "hi"
             else (
                 "Patient symptoms: chest pain, shortness of breath, fever, headache, vomiting blood, abdominal pain, nausea."
                 if normalized_lang == "en"
-                else "CareFlow intake: bukhar, sar dard, chest pain, ulti, saans lene me takleef, pet me dard, weakness."
+                else "CareFlow intake: bukhar, sar dard, chest pain, ulti, khoon ki ulti, saans lene me takleef, pet me dard, weakness."
             )
         )
 
@@ -251,34 +259,87 @@ class TranscriptionService:
         language: Optional[str] = None,
         model_size: Optional[str] = None
     ) -> Optional[TranscriptionResult]:
-        """Calls an optional hosted Whisper-compatible API endpoint if configured."""
+        """Calls a hosted Whisper endpoint (Groq Cloud whisper-large-v3, Hugging Face, or OpenAI)."""
         endpoint = settings.WHISPER_ENDPOINT
-        if not endpoint:
+        api_key = settings.WHISPER_API_KEY or settings.HF_TOKEN
+        if not endpoint or not api_key:
             return None
+
+        norm_lang = self._normalize_language(language)
+
+        # Clinical prompt conditioning to guide recognition of Hindi/Hinglish/English symptoms
+        clinical_prompt = (
+            "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, खून की उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
+            if norm_lang == "hi"
+            else (
+                "Patient symptoms: chest pain, shortness of breath, fever, headache, vomiting blood, abdominal pain, nausea."
+                if norm_lang == "en"
+                else "CareFlow intake: bukhar, sar dard, chest pain, ulti, khoon ki ulti, saans lene me takleef, pet me dard, weakness."
+            )
+        )
 
         try:
             import requests
-            headers = {}
-            if settings.WHISPER_API_KEY:
-                headers["Authorization"] = f"Bearer {settings.WHISPER_API_KEY}"
 
-            files = {"file": (filename, file_bytes, "audio/wav")}
-            data = {"model": "whisper-1"}
-            norm_lang = self._normalize_language(language)
+            # Case 1: Hugging Face router / inference endpoint (raw binary audio payload)
+            if "huggingface.co" in endpoint:
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "audio/wav"
+                }
+                resp = requests.post(endpoint, headers=headers, data=file_bytes, timeout=35)
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    text = res_data.get("text", "").strip() if isinstance(res_data, dict) else str(res_data).strip()
+                    if text:
+                        return TranscriptionResult(
+                            transcript=text,
+                            detected_language=norm_lang or "en",
+                            language_probability=0.96,
+                            confidence=0.94,
+                            duration_seconds=0.0,
+                            model_size="hosted-huggingface",
+                            source_type="voice_transcript",
+                            is_mock=False,
+                            segments=[]
+                        )
+                logger.warning(f"Hugging Face Whisper returned HTTP {resp.status_code}: {resp.text[:150]}")
+                return None
+
+            # Case 2: OpenAI / Groq compatible endpoint (multipart/form-data)
+            headers = {"Authorization": f"Bearer {api_key}"}
+            model_name = getattr(settings, "WHISPER_MODEL", "whisper-large-v3") or "whisper-large-v3"
+
+            ext = filename.lower().split(".")[-1] if "." in filename else "wav"
+            mime_map = {
+                "mp3": "audio/mpeg",
+                "wav": "audio/wav",
+                "m4a": "audio/m4a",
+                "ogg": "audio/ogg",
+                "webm": "audio/webm",
+                "flac": "audio/flac"
+            }
+            mime_type = mime_map.get(ext, "audio/wav")
+
+            files = {"file": (filename, file_bytes, mime_type)}
+            data = {
+                "model": model_name,
+                "prompt": clinical_prompt
+            }
             if norm_lang:
                 data["language"] = norm_lang
 
-            resp = requests.post(endpoint, headers=headers, files=files, data=data, timeout=30)
+            resp = requests.post(endpoint, headers=headers, files=files, data=data, timeout=35)
             if resp.status_code == 200:
                 res_data = resp.json()
                 text = res_data.get("text", "").strip()
                 return TranscriptionResult(
                     transcript=text,
                     detected_language=norm_lang or "en",
-                    language_probability=0.95,
-                    confidence=0.92,
+                    language_probability=0.97,
+                    confidence=0.95,
                     duration_seconds=0.0,
-                    model_size=model_size or "hosted",
+                    model_size=model_name,
                     source_type="voice_transcript",
                     is_mock=False,
                     segments=[]

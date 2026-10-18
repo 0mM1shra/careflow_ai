@@ -91,3 +91,48 @@ def test_transcribe_service_size_limit_rejection():
             filename="large_file.wav"
         )
     assert "exceeds" in str(exc_info.value).lower()
+
+
+def test_hosted_transcription_groq_and_hf_mocked():
+    """Verify hosted transcription parses Groq / OpenAI compatible and Hugging Face responses."""
+    from unittest.mock import patch, MagicMock
+
+    service = TranscriptionService()
+    fake_audio = b"RIFFFAKEAUDIOBYTES"
+
+    # Test Groq / OpenAI compatible response
+    with patch.object(settings, "WHISPER_ENDPOINT", "https://api.groq.com/openai/v1/audio/transcriptions"):
+        with patch.object(settings, "WHISPER_API_KEY", "gsk_test_api_key"):
+            with patch("requests.post") as mock_post:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {"text": "Mujhe do din se bukhar aur ulti hai"}
+                mock_post.return_value = mock_resp
+
+                res = service._hosted_transcribe(
+                    file_bytes=fake_audio,
+                    filename="voice.wav",
+                    language="Hindi"
+                )
+                assert res is not None
+                assert "bukhar" in res.transcript
+                assert res.is_mock is False
+                assert res.detected_language == "hi"
+
+    # Test Hugging Face response
+    with patch.object(settings, "WHISPER_ENDPOINT", "https://api-inference.huggingface.co/models/openai/whisper-large-v3"):
+        with patch.object(settings, "WHISPER_API_KEY", "hf_test_token"):
+            with patch("requests.post") as mock_post:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {"text": "I have severe chest pressure"}
+                mock_post.return_value = mock_resp
+
+                res = service._hosted_transcribe(
+                    file_bytes=fake_audio,
+                    filename="voice.wav",
+                    language="English"
+                )
+                assert res is not None
+                assert "chest pressure" in res.transcript
+                assert res.model_size == "hosted-huggingface"
