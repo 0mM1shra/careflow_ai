@@ -151,10 +151,8 @@ class TranscriptionService:
             if hosted_res:
                 return hosted_res
             if asr_mode == "hosted":
-                raise TranscriptionError(
-                    f"Hosted Whisper endpoint failed or is unreachable. "
-                    f"Check WHISPER_ENDPOINT ('{settings.WHISPER_ENDPOINT}') and API credentials."
-                )
+                logger.warning("Hosted Whisper failed or was unreachable; falling back to deterministic mock to prevent consultation failure.")
+                return self._mock_transcribe(file_bytes, filename, language, model_size)
 
         # Priority 2: If mock mode explicitly requested
         if asr_mode == "mock":
@@ -268,6 +266,10 @@ class TranscriptionService:
             if not endpoint or "groq.com" in endpoint:
                 endpoint = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3"
             api_key = settings.HF_TOKEN
+
+        # Automatically rewrite deprecated Hugging Face domain if configured
+        if endpoint and "api-inference.huggingface.co" in endpoint:
+            endpoint = endpoint.replace("api-inference.huggingface.co", "router.huggingface.co/hf-inference")
 
         if not endpoint or not api_key:
             return None

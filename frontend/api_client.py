@@ -88,7 +88,12 @@ class CareFlowAPIClient:
         if model_size:
             params["model_size"] = model_size
         resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=45)
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                err_detail = resp.json().get("detail", resp.text)
+            except Exception:
+                err_detail = resp.text
+            raise RuntimeError(err_detail or f"HTTP {resp.status_code}")
         return resp.json()
 
     def preview_document_extraction(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
