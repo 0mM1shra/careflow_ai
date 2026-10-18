@@ -423,11 +423,12 @@ with col_detail:
                 for m in msgs:
                     if m["role"] == "patient":
                         m_source = m.get("source_type", "patient_typed")
-                        if m_source == "voice":
-                            conf_str = f" | Conf: {int(m.get('transcription_confidence', 0)*100)}%" if m.get("transcription_confidence") is not None else ""
+                        if m_source in ("voice", "voice_transcript"):
+                            conf_val = m.get("transcription_confidence")
+                            conf_str = f" | Conf: {int(conf_val*100)}%" if conf_val is not None else ""
                             lang_str = f" | {m.get('source_language')}" if m.get("source_language") else ""
                             mod_label = f'<span style="background:#EEF2FF; color:#4338CA; border:1px solid #C7D2FE; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">🎤 Voice{lang_str}{conf_str}</span>'
-                        elif m_source == "ocr":
+                        elif m_source in ("ocr", "ocr_extraction"):
                             mod_label = '<span style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">📄 Report OCR</span>'
                         else:
                             mod_label = '<span style="background:#F1F5F9; color:#475569; border:1px solid #CBD5E1; font-size:11px; font-weight:700; padding:2px 6px; border-radius:6px; margin-left:6px;">💬 Typed</span>'
@@ -437,6 +438,8 @@ with col_detail:
 
                     st.markdown(f"**{role_label}** `({m.get('created_at', '')[:19]})`:", unsafe_allow_html=True)
                     st.write(f"> {m['content']}")
+                    if m.get("raw_transcript") and m.get("raw_transcript").strip() != m["content"].strip():
+                        st.caption(f"🎤 *Original ASR transcript (before patient edits):* &ldquo;{m['raw_transcript']}&rdquo;")
 
             # Reviewer Controls & Approval Form
             st.subheader("Clinician Actions & Approval")

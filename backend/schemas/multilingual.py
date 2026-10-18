@@ -6,8 +6,8 @@ class TranscriptionResult(BaseModel):
     """Result of audio speech-to-text transcription."""
     transcript: str = Field(..., description="Recognized speech text in original language")
     detected_language: str = Field("en", description="Detected language code (e.g. 'en', 'hi', 'ur')")
-    language_probability: float = Field(1.0, description="Confidence of detected language")
-    confidence: float = Field(1.0, description="Average token confidence score (0.0 to 1.0)")
+    language_probability: Optional[float] = Field(None, description="Confidence of detected language")
+    confidence: Optional[float] = Field(None, description="Average token confidence score (0.0 to 1.0) or None if unavailable")
     duration_seconds: float = Field(0.0, description="Audio duration in seconds")
     model_size: str = Field("base", description="Whisper model size used: 'base' or 'tiny'")
     source_type: Literal["voice_transcript"] = "voice_transcript"

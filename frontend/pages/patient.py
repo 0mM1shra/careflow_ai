@@ -1,5 +1,6 @@
 import streamlit as st
 import sys
+import hashlib
 from pathlib import Path
 
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -78,7 +79,7 @@ st.markdown("""
 UI_TEXT = {
     "English": {
         "title": "🩺 CareFlow Clinical Intake",
-        "subtitle": "Private & Adaptive Symptom Assessment (Powered by MedGemma)",
+        "subtitle": "Private & Confidential Clinical Symptom Intake",
         "privacy_title": "🛡️ Privacy Protection Notice:",
         "privacy_body": "Please do <strong>NOT</strong> enter your name, telephone number, home address, social security / Aadhaar number, or any other identifying personal information. You will be assigned a random, non-identifying Case ID.",
         "emergency_title": "🚨 POTENTIAL MEDICAL EMERGENCY DETECTED:",
@@ -88,8 +89,8 @@ UI_TEXT = {
         "complaint_label": "What symptoms or health concerns are you experiencing today?",
         "complaint_placeholder": "e.g., I have had a severe sore throat and high fever for 2 days, and it hurts when I swallow. / मुझे दो दिन से तेज़ बुखार और गले में दर्द है...",
         "doc_upload_header": "📄 Attach Medical Document or Prescription (Optional)",
-        "doc_upload_help": "Upload an image (PNG, JPG) or PDF of a prescription, lab test, or clinical discharge report. Native OCR will securely extract the text before sending it to MedGemma.",
-        "doc_extracted_alert": "✅ Medical document parsed via OCR and attached to your clinical record.",
+        "doc_upload_help": "Upload an image (PNG, JPG) or PDF of a prescription, lab test, or clinical report. Text will be automatically extracted and reviewed.",
+        "doc_extracted_alert": "✅ Medical document parsed and attached to your clinical record.",
         "start_btn": "Start Intake Assessment →",
         "case_id_label": "Case ID",
         "question_count": "Question {curr} of {max}",
@@ -102,7 +103,7 @@ UI_TEXT = {
         "skip_btn": "Skip ⏩",
         "unknown_btn": "I Don't Know ❓",
         "early_submit_btn": "Finish & Review Now (Submit Early) 📋",
-        "upload_during_chat": "📎 Upload Additional Medical Document / Lab Report (PDF or Image OCR)",
+        "upload_during_chat": "📎 Upload Additional Medical Document / Lab Report (PDF or Image)",
         "upload_btn": "Extract & Ingest Document 📤",
         "voice_header": "🎤 Voice Input (Record or Upload Audio)",
         "voice_help": "Record symptoms in English, Hindi (हिन्दी), or Hinglish. You will review and edit the transcript before sending.",
@@ -125,7 +126,7 @@ UI_TEXT = {
     },
     "हिन्दी (Hindi)": {
         "title": "🩺 CareFlow क्लिनिकल इनटेक",
-        "subtitle": "निजी एवं अनुकूली लक्षण मूल्यांकन (Google MedGemma द्वारा संचालित)",
+        "subtitle": "सुरक्षित एवं गोपनीय क्लिनिकल लक्षण मूल्यांकन",
         "privacy_title": "🛡️ गोपनीयता संरक्षण सूचना:",
         "privacy_body": "कृपया अपना <strong>नाम, फ़ोन नंबर, घर का पता, आधार कार्ड नंबर</strong> या कोई अन्य पहचान योग्य व्यक्तिगत जानकारी दर्ज <strong>न करें</strong>। आपको एक सुरक्षित, गैर-पहचान योग्य केस आईडी प्रदान की जाएगी।",
         "emergency_title": "🚨 संभावित आपातकालीन स्थिति पहचानी गई:",
@@ -135,8 +136,8 @@ UI_TEXT = {
         "complaint_label": "आज आप किन लक्षणों या स्वास्थ्य संबंधी परेशानियों का सामना कर रहे हैं?",
         "complaint_placeholder": "उदा: मुझे दो दिन से तेज़ बुखार, गले में ख़राश और दर्द है, और निगलने में बहुत तकलीफ़ हो रही है...",
         "doc_upload_header": "📄 मेडिकल पर्ची या दस्तावेज़ अपलोड करें (वैकल्पिक)",
-        "doc_upload_help": "डॉक्टर की पर्ची, लैब टेस्ट या डिस्चार्ज समरी की फ़ोटो (PNG, JPG) या PDF अपलोड करें। हमारा OCR सिस्टम सुरक्षित रूप से टेक्स्ट निकाल कर MedGemma को प्रदान करेगा।",
-        "doc_extracted_alert": "✅ दस्तावेज़ से OCR द्वारा टेक्स्ट सफलतापूर्वक प्राप्त कर लिया गया है।",
+        "doc_upload_help": "डॉक्टर की पर्ची, लैब टेस्ट या रिपोर्ट की फ़ोटो (PNG, JPG) या PDF अपलोड करें। दस्तावेज़ से टेक्स्ट सुरक्षित रूप से निकाला जाएगा।",
+        "doc_extracted_alert": "✅ दस्तावेज़ से टेक्स्ट सफलतापूर्वक प्राप्त कर लिया गया है।",
         "start_btn": "इनटेक मूल्यांकन शुरू करें →",
         "case_id_label": "केस आईडी",
         "question_count": "प्रश्न {curr} / {max}",
@@ -193,6 +194,8 @@ if "uploaded_docs" not in st.session_state:
     st.session_state.uploaded_docs = []
 if "pending_voice" not in st.session_state:
     st.session_state.pending_voice = None
+if "pending_voice_start" not in st.session_state:
+    st.session_state.pending_voice_start = None
 if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
@@ -237,96 +240,225 @@ if st.session_state.is_emergency:
     """, unsafe_allow_html=True)
 
 # =====================================================================
-# STEP 1: START INTAKE (Language, Chief Complaint, & Document OCR)
+# STEP 1: START INTAKE (Typed, Browser Mic, Audio Upload, & Document OCR)
 # =====================================================================
 if st.session_state.intake_step == "start":
     st.subheader(t["start_title"])
+    backend_lang = "Hindi" if "Hindi" in st.session_state.selected_lang else "English"
 
-    # Document upload accordion before/with chief complaint
-    with st.expander(t["doc_upload_header"], expanded=False):
-        st.caption(t["doc_upload_help"])
-        doc_file_start = st.file_uploader(
-            "Upload Prescription or Medical Document (PDF, PNG, JPG, JPEG)",
-            type=["pdf", "png", "jpg", "jpeg"],
-            key="doc_start"
+    # CASE A: PENDING INITIAL VOICE TRANSCRIPT REVIEW
+    if st.session_state.pending_voice_start is not None:
+        pv = st.session_state.pending_voice_start
+        p_trans = pv.get("transcript", "")
+        p_lang = pv.get("language", backend_lang)
+        p_conf = pv.get("confidence")
+        conf_pct = int(p_conf * 100) if p_conf is not None else 0
+        conf_status = "High confidence" if (p_conf or 0) >= 0.70 else "⚠️ Lower confidence — please verify accuracy"
+
+        st.markdown(f"""
+        <div style="background-color: #F5F3FF; border: 2px solid #C4B5FD; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+            <h4 style="margin: 0 0 6px 0; color: #5B21B6; font-size: 15px;">{t['voice_transcript_title']}</h4>
+            <div style="font-size: 13px; color: #6D28D9;">
+                Detected: <strong>{p_lang.title() if p_lang else 'Auto'}</strong> | Acoustic Confidence: <strong>{conf_pct}% ({conf_status})</strong>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.session_state.get("last_start_voice_hash") != pv.get("audio_hash"):
+            st.session_state["voice_transcript_start_edit"] = p_trans
+            st.session_state["last_start_voice_hash"] = pv.get("audio_hash")
+
+        edited_start_voice = st.text_area(
+            "Review or edit your transcribed complaint before starting intake:",
+            value=st.session_state.get("voice_transcript_start_edit", p_trans),
+            key="voice_transcript_start_edit",
+            height=110
         )
-        if doc_file_start is not None:
-            st.info(f"📁 Selected: **{doc_file_start.name}** ({doc_file_start.size} bytes). This will be scanned via OCR and attached to your intake.")
+        col_sv1, col_sv2 = st.columns([2, 1])
+        with col_sv1:
+            if st.button("Confirm & Start Intake Assessment →", type="primary", key="btn_confirm_start_voice", use_container_width=True):
+                if edited_start_voice.strip():
+                    with st.spinner("Initializing private intake session & analyzing voice input..."):
+                        try:
+                            # 1. Create case in backend
+                            new_case = api_client.create_case(
+                                preferred_language=backend_lang,
+                                chief_complaint=edited_start_voice.strip()
+                            )
+                            case_id = new_case["id"]
+                            st.session_state.case_id = case_id
 
-    chief_complaint = st.text_area(
-        t["complaint_label"],
-        placeholder=t["complaint_placeholder"],
-        height=120
-    )
+                            # 2. Add first message as verified voice input
+                            msg_res = api_client.send_message(
+                                case_id=case_id,
+                                content=edited_start_voice.strip(),
+                                raw_transcript=p_trans,
+                                source_type="voice",
+                                source_language=p_lang,
+                                transcription_confidence=p_conf,
+                                is_confirmed=True
+                            )
+                            st.session_state.messages.append({
+                                "role": "patient",
+                                "content": edited_start_voice.strip(),
+                                "raw_transcript": p_trans,
+                                "source_type": "voice",
+                                "source_language": p_lang,
+                                "transcription_confidence": p_conf
+                            })
+                            if msg_res.get("is_emergency"):
+                                st.session_state.is_emergency = True
 
-    if st.button(t["start_btn"], type="primary", use_container_width=True):
-        if not chief_complaint.strip() and not doc_file_start:
-            st.warning("Please provide a description of what you are experiencing or upload a medical document.")
-        else:
-            with st.spinner("Initializing private intake session & analyzing medical input..."):
-                try:
-                    # Map selected UI language to backend format
-                    backend_lang = "Hindi" if "Hindi" in st.session_state.selected_lang else "English"
+                            # 3. Clean up start voice state
+                            st.session_state.pending_voice_start = None
+                            st.session_state.pop("voice_transcript_start_edit", None)
+                            st.session_state.pop("last_start_voice_hash", None)
 
-                    # 1. Create case in backend
-                    initial_complaint = chief_complaint.strip() if chief_complaint.strip() else "Medical document attached for intake assessment"
-                    new_case = api_client.create_case(
-                        preferred_language=backend_lang,
-                        chief_complaint=initial_complaint
-                    )
-                    case_id = new_case["id"]
-                    st.session_state.case_id = case_id
+                            # 4. Request first follow-up question
+                            q_res = api_client.get_next_question(case_id)
+                            st.session_state.turn_count = 1
 
-                    # 2. If a document was uploaded, process OCR via upload endpoint
-                    if doc_file_start is not None:
-                        file_bytes = doc_file_start.getvalue()
-                        up_res = api_client.upload_document(case_id, file_bytes, doc_file_start.name)
-                        st.session_state.uploaded_docs.append({
-                            "name": doc_file_start.name,
-                            "char_count": up_res.get("char_count", 0),
-                            "ocr_preview": up_res.get("extracted_text_snippet", "")
-                        })
-                        if up_res.get("is_emergency"):
-                            st.session_state.is_emergency = True
+                            if q_res.get("next_question"):
+                                st.session_state.current_question = q_res["next_question"]
+                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                st.session_state.intake_step = "chatting"
+                            else:
+                                st.session_state.intake_step = "review_edit"
 
-                    # 3. Add first message to backend if chief complaint was typed
-                    if chief_complaint.strip():
-                        msg_res = api_client.send_message(
-                            case_id,
-                            chief_complaint.strip(),
-                            source_type="patient_typed",
-                            source_language=backend_lang,
-                            is_confirmed=True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error starting intake session: {e}")
+                else:
+                    st.warning("Please enter or edit your symptoms before continuing.")
+        with col_sv2:
+            if st.button(t["voice_discard_btn"], key="btn_discard_start_voice", use_container_width=True):
+                st.session_state.pending_voice_start = None
+                st.session_state.pop("voice_transcript_start_edit", None)
+                st.session_state.pop("last_start_voice_hash", None)
+                st.rerun()
+
+    # STANDARD INITIAL INTAKE INPUTS (Typed / Voice Recording / Document OCR)
+    else:
+        st.markdown("#### ✍️ Option 1: Type Your Symptoms")
+        chief_complaint = st.text_area(
+            t["complaint_label"],
+            placeholder=t["complaint_placeholder"],
+            height=100,
+            key="chief_complaint_typed"
+        )
+
+        st.markdown("#### 🎙️ Option 2: Record or Upload Audio (English / हिन्दी / Hinglish)")
+        st.caption("Speak naturally in English, Hindi, or Hinglish. You will review and edit your transcript before starting intake.")
+        col_audio1, col_audio2 = st.columns(2)
+        rec_audio_start = None
+        with col_audio1:
+            if hasattr(st, "audio_input"):
+                rec_audio_start = st.audio_input("Record via Microphone", key="mic_start")
+        with col_audio2:
+            upl_audio_start = st.file_uploader(
+                "Upload Voice Audio (WAV, MP3, M4A, OGG, WEBM)",
+                type=["wav", "mp3", "m4a", "ogg", "webm", "flac"],
+                key="audio_start"
+            )
+
+        chosen_start_audio = rec_audio_start or upl_audio_start
+        if chosen_start_audio is not None:
+            if st.button("Transcribe Initial Voice 🎙️", type="secondary", key="btn_transcribe_start", use_container_width=True):
+                with st.spinner("Transcribing voice audio..."):
+                    try:
+                        audio_bytes = chosen_start_audio.getvalue()
+                        audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+                        fname = getattr(chosen_start_audio, "name", "recording.wav") or "recording.wav"
+                        t_res = api_client.transcribe_audio(
+                            file_bytes=audio_bytes,
+                            filename=fname,
+                            language=None  # Auto-detect English, Hindi, or Hinglish
                         )
-                        st.session_state.messages.append({
-                            "role": "patient",
-                            "content": chief_complaint.strip(),
-                            "source_type": "patient_typed",
-                            "source_language": backend_lang
-                        })
-                        if msg_res.get("is_emergency"):
-                            st.session_state.is_emergency = True
-                    elif doc_file_start is not None:
-                        st.session_state.messages.append({
-                            "role": "patient",
-                            "content": f"[Attached Medical Document: {doc_file_start.name}]",
-                            "source_type": "ocr"
-                        })
+                        t_res["audio_hash"] = audio_hash
+                        st.session_state.pending_voice_start = t_res
+                        st.session_state["voice_transcript_start_edit"] = t_res.get("transcript", "")
+                        st.session_state["last_start_voice_hash"] = audio_hash
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Voice transcription error: {e}")
 
-                    # 4. Request first follow-up question
-                    q_res = api_client.get_next_question(case_id)
-                    st.session_state.turn_count = 1
+        # Document upload accordion before/with chief complaint
+        with st.expander(t["doc_upload_header"], expanded=False):
+            st.caption(t["doc_upload_help"])
+            doc_file_start = st.file_uploader(
+                "Upload Prescription or Medical Document (PDF, PNG, JPG, JPEG)",
+                type=["pdf", "png", "jpg", "jpeg"],
+                key="doc_start"
+            )
+            if doc_file_start is not None:
+                st.info(f"📁 Selected: **{doc_file_start.name}** ({doc_file_start.size} bytes). This will be scanned and attached to your intake.")
 
-                    if q_res.get("next_question"):
-                        st.session_state.current_question = q_res["next_question"]
-                        st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
-                        st.session_state.intake_step = "chatting"
-                    else:
-                        st.session_state.intake_step = "review_edit"
+        st.write("---")
+        if st.button(t["start_btn"], type="primary", use_container_width=True):
+            if not chief_complaint.strip() and not doc_file_start:
+                st.warning("Please type your symptoms, record voice audio, or attach a medical document.")
+            else:
+                with st.spinner("Initializing private intake session & analyzing medical input..."):
+                    try:
+                        # 1. Create case in backend
+                        initial_complaint = chief_complaint.strip() if chief_complaint.strip() else "Medical document attached for intake assessment"
+                        new_case = api_client.create_case(
+                            preferred_language=backend_lang,
+                            chief_complaint=initial_complaint
+                        )
+                        case_id = new_case["id"]
+                        st.session_state.case_id = case_id
 
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error connecting to CareFlow backend: {e}")
+                        # 2. If a document was uploaded, process OCR via upload endpoint
+                        if doc_file_start is not None:
+                            file_bytes = doc_file_start.getvalue()
+                            up_res = api_client.upload_document(case_id, file_bytes, doc_file_start.name)
+                            st.session_state.uploaded_docs.append({
+                                "name": doc_file_start.name,
+                                "char_count": up_res.get("char_count", 0),
+                                "ocr_preview": up_res.get("extracted_text_snippet", "")
+                            })
+                            if up_res.get("is_emergency"):
+                                st.session_state.is_emergency = True
+
+                        # 3. Add first message to backend if chief complaint was typed
+                        if chief_complaint.strip():
+                            msg_res = api_client.send_message(
+                                case_id=case_id,
+                                content=chief_complaint.strip(),
+                                source_type="patient_typed",
+                                source_language=backend_lang,
+                                is_confirmed=True
+                            )
+                            st.session_state.messages.append({
+                                "role": "patient",
+                                "content": chief_complaint.strip(),
+                                "source_type": "patient_typed",
+                                "source_language": backend_lang
+                            })
+                            if msg_res.get("is_emergency"):
+                                st.session_state.is_emergency = True
+                        elif doc_file_start is not None:
+                            st.session_state.messages.append({
+                                "role": "patient",
+                                "content": f"[Attached Medical Document: {doc_file_start.name}]",
+                                "source_type": "ocr"
+                            })
+
+                        # 4. Request first follow-up question
+                        q_res = api_client.get_next_question(case_id)
+                        st.session_state.turn_count = 1
+
+                        if q_res.get("next_question"):
+                            st.session_state.current_question = q_res["next_question"]
+                            st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                            st.session_state.intake_step = "chatting"
+                        else:
+                            st.session_state.intake_step = "review_edit"
+
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error connecting to CareFlow backend: {e}")
 
 # =====================================================================
 # STEP 2: CONVERSATIONAL ADAPTIVE QUESTIONING & IN-CHAT OCR UPLOAD
@@ -367,7 +499,7 @@ elif st.session_state.intake_step == "chatting":
         pv = st.session_state.pending_voice
         p_trans = pv.get("transcript", "")
         p_lang = pv.get("language", backend_lang)
-        p_conf = pv.get("confidence", 0.0)
+        p_conf = pv.get("confidence")
         conf_pct = int(p_conf * 100) if p_conf is not None else 0
         conf_status = "High confidence" if (p_conf or 0) >= 0.70 else "⚠️ Lower confidence — please verify accuracy"
 
@@ -375,14 +507,18 @@ elif st.session_state.intake_step == "chatting":
         <div style="background-color: #F5F3FF; border: 2px solid #C4B5FD; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
             <h4 style="margin: 0 0 6px 0; color: #5B21B6; font-size: 15px;">{t['voice_transcript_title']}</h4>
             <div style="font-size: 13px; color: #6D28D9;">
-                Detected: <strong>{p_lang.title()}</strong> | Acoustic Confidence: <strong>{conf_pct}% ({conf_status})</strong>
+                Detected: <strong>{p_lang.title() if p_lang else 'Auto'}</strong> | Acoustic Confidence: <strong>{conf_pct}% ({conf_status})</strong>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
+        if st.session_state.get("last_voice_hash") != pv.get("audio_hash"):
+            st.session_state["voice_transcript_edit"] = p_trans
+            st.session_state["last_voice_hash"] = pv.get("audio_hash")
+
         edited_voice_text = st.text_area(
             "Review or edit transcribed text before submitting:",
-            value=p_trans,
+            value=st.session_state.get("voice_transcript_edit", p_trans),
             key="voice_transcript_edit",
             height=100
         )
@@ -395,6 +531,7 @@ elif st.session_state.intake_step == "chatting":
                             send_res = api_client.send_message(
                                 case_id=st.session_state.case_id,
                                 content=edited_voice_text.strip(),
+                                raw_transcript=p_trans,
                                 source_type="voice",
                                 source_language=p_lang,
                                 transcription_confidence=p_conf,
@@ -403,6 +540,7 @@ elif st.session_state.intake_step == "chatting":
                             st.session_state.messages.append({
                                 "role": "patient",
                                 "content": edited_voice_text.strip(),
+                                "raw_transcript": p_trans,
                                 "source_type": "voice",
                                 "source_language": p_lang,
                                 "transcription_confidence": p_conf
@@ -410,6 +548,8 @@ elif st.session_state.intake_step == "chatting":
                             if send_res.get("is_emergency"):
                                 st.session_state.is_emergency = True
                             st.session_state.pending_voice = None
+                            st.session_state.pop("voice_transcript_edit", None)
+                            st.session_state.pop("last_voice_hash", None)
 
                             q_res = api_client.get_next_question(st.session_state.case_id)
                             st.session_state.turn_count += 1
@@ -426,6 +566,8 @@ elif st.session_state.intake_step == "chatting":
         with col_v2:
             if st.button(t["voice_discard_btn"], key="btn_discard_voice", use_container_width=True):
                 st.session_state.pending_voice = None
+                st.session_state.pop("voice_transcript_edit", None)
+                st.session_state.pop("last_voice_hash", None)
                 st.rerun()
 
     # -------------------------------------------------------------
@@ -575,23 +717,27 @@ elif st.session_state.intake_step == "chatting":
                 chosen_audio = rec_audio or upl_audio
                 if chosen_audio is not None:
                     if st.button("Transcribe Audio 🎙️", type="primary", key="btn_run_transcribe", use_container_width=True):
-                        with st.spinner("Transcribing voice audio via faster-whisper..."):
+                        with st.spinner("Transcribing voice recording..."):
                             try:
                                 audio_bytes = chosen_audio.getvalue()
+                                audio_hash = hashlib.sha256(audio_bytes).hexdigest()
                                 fname = getattr(chosen_audio, "name", "recording.wav") or "recording.wav"
                                 t_res = api_client.transcribe_audio(
                                     file_bytes=audio_bytes,
                                     filename=fname,
-                                    language=backend_lang
+                                    language=None  # Auto-detect English, Hindi, or Hinglish
                                 )
+                                t_res["audio_hash"] = audio_hash
                                 st.session_state.pending_voice = t_res
+                                st.session_state["voice_transcript_edit"] = t_res.get("transcript", "")
+                                st.session_state["last_voice_hash"] = audio_hash
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Transcription error: {e}")
 
         with col_exp2:
             with st.expander(t["upload_during_chat"], expanded=False):
-                st.caption("Upload prescription or report image/PDF for OCR preview before adding to record.")
+                st.caption("Upload prescription or report image/PDF for preview before adding to record.")
                 doc_in_chat = st.file_uploader(
                     "Upload image/PDF (PNG, JPG, PDF)",
                     type=["pdf", "png", "jpg", "jpeg", "webp"],
@@ -599,7 +745,7 @@ elif st.session_state.intake_step == "chatting":
                 )
                 if doc_in_chat is not None:
                     if st.button("Extract & Preview Document Text 🔍", type="secondary", key="btn_run_preview_doc", use_container_width=True):
-                        with st.spinner("Extracting text via OCR (PaddleOCR/winocr)..."):
+                        with st.spinner("Extracting text from medical document..."):
                             try:
                                 file_bytes = doc_in_chat.getvalue()
                                 preview_res = api_client.preview_document_extraction(

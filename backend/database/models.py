@@ -74,6 +74,7 @@ class Message(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Provenance and Modality Metadata
+    raw_transcript = Column(Text, nullable=True)  # Original unedited ASR transcript if voice
     source_type = Column(String(32), default="patient_typed", nullable=True)  # 'patient_typed', 'voice_transcript', 'ocr_extraction'
     source_language = Column(String(16), nullable=True)
     transcription_confidence = Column(Float, nullable=True)
@@ -88,6 +89,7 @@ class Message(Base):
             "case_id": self.case_id,
             "role": self.role,
             "content": self.content,
+            "raw_transcript": self.raw_transcript,
             "source_type": self.source_type or "patient_typed",
             "source_language": self.source_language,
             "transcription_confidence": self.transcription_confidence,

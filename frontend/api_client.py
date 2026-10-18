@@ -54,6 +54,7 @@ class CareFlowAPIClient:
         self,
         case_id: str,
         content: str,
+        raw_transcript: Optional[str] = None,
         source_type: str = "patient_typed",
         source_language: Optional[str] = None,
         confidence: Optional[float] = None,
@@ -63,6 +64,7 @@ class CareFlowAPIClient:
         conf = transcription_confidence if transcription_confidence is not None else confidence
         payload = {
             "content": content,
+            "raw_transcript": raw_transcript,
             "source_type": source_type,
             "source_language": source_language,
             "transcription_confidence": conf,

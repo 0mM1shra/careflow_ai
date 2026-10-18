@@ -266,6 +266,7 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         case_id=case_id,
         role="patient",
         content=content_clean,
+        raw_transcript=req.raw_transcript,
         source_type=req.source_type or "patient_typed",
         source_language=req.source_language,
         transcription_confidence=req.transcription_confidence,
@@ -512,9 +513,25 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
         ai_status=case.ai_status
     )
 
-    # 3. Store Triage & Queue Attributes
-    case.priority_category = triage_res.priority_category
-    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    # 3. Store Triage & Queue Attributes with Escalation Preservation
+    final_priority = triage_res.priority_category
+    final_reasons = list(triage_res.reasons)
+
+    if case.ai_status == "failed" or triage_res.priority_category == "ERR":
+        final_priority = "ERR"
+    else:
+        # P0/P1 emergency escalation cannot be downgraded upon final case submission
+        existing_p = case.priority_category
+        existing_reasons = json.loads(case.priority_reasons_json or "[]")
+        if existing_p == "P0" and final_priority != "P0":
+            final_priority = "P0"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+        elif existing_p == "P1" and final_priority in ("P2", "P3"):
+            final_priority = "P1"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+
+    case.priority_category = final_priority
+    case.priority_reasons_json = json.dumps(final_reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
     case.review_status = "pending"

@@ -49,6 +49,9 @@ def _migrate_sqlite_schema():
                 if "source_language" not in existing_msg_cols:
                     logger.info("Migrating messages table: adding source_language column")
                     conn.execute(text("ALTER TABLE messages ADD COLUMN source_language VARCHAR(16)"))
+                if "raw_transcript" not in existing_msg_cols:
+                    logger.info("Migrating messages table: adding raw_transcript column")
+                    conn.execute(text("ALTER TABLE messages ADD COLUMN raw_transcript TEXT"))
                 if "transcription_confidence" not in existing_msg_cols:
                     logger.info("Migrating messages table: adding transcription_confidence column")
                     conn.execute(text("ALTER TABLE messages ADD COLUMN transcription_confidence FLOAT"))

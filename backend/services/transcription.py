@@ -96,7 +96,7 @@ class TranscriptionService:
         if not language:
             return None
         cleaned = language.strip().lower()
-        if cleaned in ("", "auto", "detect", "automatic", "none", "null"):
+        if cleaned in ("", "auto", "detect", "automatic", "none", "null", "hinglish", "mixed"):
             return None
         mapping = {
             "english": "en",
@@ -105,9 +105,8 @@ class TranscriptionService:
             "hindi": "hi",
             "hi": "hi",
             "hin": "hi",
-            "hinglish": None,  # Hinglish uses mixed code, best detected automatically or handled without language lock
         }
-        return mapping.get(cleaned, cleaned)
+        return mapping.get(cleaned, None)
 
     def transcribe_audio(
         self,
@@ -142,22 +141,22 @@ class TranscriptionService:
         if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
             return self._mock_transcribe(file_bytes, filename, language, model_size)
 
-        # Determine execution mode: mock, local, or auto
-        asr_mode = getattr(settings, "ASR_MODE", "auto").lower()
-        use_mock = (asr_mode == "mock") or (asr_mode == "auto" and settings.MEDGEMMA_MODE == "mock")
-        if use_mock:
-            return self._mock_transcribe(file_bytes, filename, language, model_size)
+        # Determine execution mode: mock, local, or auto (independent of MEDGEMMA_MODE)
+        asr_mode = (getattr(settings, "ASR_MODE", None) or os.getenv("ASR_MODE", "auto")).lower()
+        use_mock = (asr_mode == "mock")
+        if not use_mock:
+            try:
+                import faster_whisper
+            except ImportError:
+                if asr_mode == "local":
+                    raise TranscriptionError(
+                        "faster-whisper is not installed. Run 'pip install faster-whisper' "
+                        "or set ASR_MODE=mock for testing."
+                    )
+                logger.warning("faster-whisper not installed; falling back to mock transcription.")
+                use_mock = True
 
-        # Check for faster-whisper availability
-        try:
-            import faster_whisper
-        except ImportError:
-            if asr_mode == "local":
-                raise TranscriptionError(
-                    "faster-whisper is not installed. Run 'pip install faster-whisper' "
-                    "or set ASR_MODE=mock for testing."
-                )
-            logger.warning("faster-whisper not installed; falling back to mock transcription.")
+        if use_mock:
             return self._mock_transcribe(file_bytes, filename, language, model_size)
 
         # Real faster-whisper execution

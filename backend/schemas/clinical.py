@@ -108,6 +108,7 @@ class CaseCreateRequest(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     content: str = Field(..., min_length=1, description="Patient message text")
+    raw_transcript: Optional[str] = Field(None, description="Original unedited transcript before patient edits")
     source_type: Optional[str] = Field("patient_typed", description="Origin: patient_typed, voice_transcript, ocr_extraction")
     source_language: Optional[str] = Field(None, description="Source language code")
     transcription_confidence: Optional[float] = Field(None, description="Confidence if from ASR/OCR")

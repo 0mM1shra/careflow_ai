@@ -220,10 +220,11 @@ def test_real_faster_whisper_tiny_local_transcription():
     import subprocess
 
     code = """
-import io, wave
+import os, io, wave
 from backend.services.transcription import transcription_service
 from backend.config import settings
 
+os.environ["ASR_MODE"] = "local"
 settings.ASR_MODE = "local"
 buf = io.BytesIO()
 with wave.open(buf, "wb") as wav:
@@ -376,5 +377,149 @@ def test_full_multimodal_patient_and_reviewer_journey(client):
     )
     assert review_resp.status_code == 200
     assert review_resp.json()["review_status"] == "approved"
+
+
+def test_voice_raw_transcript_provenance_and_patient_editing(client, db_session):
+    """Verify that when a patient edits a voice transcript, both raw_transcript and edited content are preserved."""
+    create_resp = client.post("/cases", json={"preferred_language": "English"})
+    assert create_resp.status_code == 201
+    case_id = create_resp.json()["id"]
+
+    raw_asr = "I have severe chest pain and radiating arm numbness"
+    edited_text = "I have had severe chest pain radiating to my left arm since this morning"
+
+    msg_resp = client.post(
+        f"/cases/{case_id}/messages",
+        json={
+            "content": edited_text,
+            "raw_transcript": raw_asr,
+            "source_type": "voice",
+            "source_language": "en",
+            "transcription_confidence": 0.94,
+            "is_confirmed": True
+        }
+    )
+    assert msg_resp.status_code == 200
+    msg_data = msg_resp.json()["message"]
+    assert msg_data["content"] == edited_text
+    assert msg_data["raw_transcript"] == raw_asr
+    assert msg_data["source_type"] == "voice"
+
+    # Verify directly in SQLite DB
+    db_session.expire_all()
+    db_msg = db_session.query(Message).filter(Message.case_id == case_id).first()
+    assert db_msg is not None
+    assert db_msg.content == edited_text
+    assert db_msg.raw_transcript == raw_asr
+
+    # Verify case GET endpoint returns raw_transcript
+    case_resp = client.get(f"/cases/{case_id}")
+    assert case_resp.status_code == 200
+    fetched_msg = case_resp.json()["messages"][0]
+    assert fetched_msg["content"] == edited_text
+    assert fetched_msg["raw_transcript"] == raw_asr
+
+
+def test_priority_escalation_preserved_on_final_submit(client, db_session):
+    """Verify that an interim P0 or P1 emergency escalation is never downgraded upon final case submission."""
+    create_resp = client.post("/cases", json={"preferred_language": "English"})
+    case_id = create_resp.json()["id"]
+
+    # Message 1 triggers P0 (chest pain radiating to left arm)
+    msg1_resp = client.post(
+        f"/cases/{case_id}/messages",
+        json={
+            "content": "I have sudden crushing chest pain radiating to my left arm and neck.",
+            "source_type": "patient_typed"
+        }
+    )
+    assert msg1_resp.status_code == 200
+    assert msg1_resp.json()["interim_priority"] == "P0"
+
+    # Verify case priority is now P0
+    case_resp = client.get(f"/cases/{case_id}")
+    assert case_resp.json()["priority_category"] == "P0"
+
+    # Message 2 is a mild statement without emergency keywords
+    msg2_resp = client.post(
+        f"/cases/{case_id}/messages",
+        json={
+            "content": "No fever or cough.",
+            "source_type": "patient_typed"
+        }
+    )
+    assert msg2_resp.status_code == 200
+
+    # Submit case - should preserve P0 and NOT downgrade
+    submit_resp = client.post(f"/cases/{case_id}/submit")
+    assert submit_resp.status_code == 200
+    submit_data = submit_resp.json()
+    assert submit_data["priority_category"] == "P0"
+
+    # Double check database persistence
+    db_session.expire_all()
+    case_row = db_session.query(Case).filter(Case.id == case_id).first()
+    assert case_row.priority_category == "P0"
+
+
+def test_ai_failure_defaults_to_err_never_p3(client, db_session):
+    """Verify that if AI extraction/summary fails, final triage defaults to ERR (never P3)."""
+    create_resp = client.post("/cases", json={"preferred_language": "English"})
+    case_id = create_resp.json()["id"]
+
+    # Send a routine complaint
+    client.post(
+        f"/cases/{case_id}/messages",
+        json={"content": "I have had a mild cough for three days.", "source_type": "patient_typed"}
+    )
+
+    # Force AI failure during summarization
+    with patch("backend.services.summarization.ClinicalSummarizationService.generate_summary") as mock_sum:
+        mock_sum.side_effect = RuntimeError("MedGemma endpoint unavailable")
+        submit_resp = client.post(f"/cases/{case_id}/submit")
+        assert submit_resp.status_code == 200
+        submit_data = submit_resp.json()
+        assert submit_data["ai_status"] == "failed"
+        assert submit_data["priority_category"] == "ERR"
+
+
+def test_normalize_language_hinglish_and_auto_detection():
+    """Verify _normalize_language handles Hinglish, auto, and case variations without forcing wrong language."""
+    assert transcription_service._normalize_language("Hinglish") is None
+    assert transcription_service._normalize_language("hinglish") is None
+    assert transcription_service._normalize_language("mixed") is None
+    assert transcription_service._normalize_language("auto") is None
+    assert transcription_service._normalize_language("Automatic") is None
+    assert transcription_service._normalize_language(None) is None
+    assert transcription_service._normalize_language("") is None
+    assert transcription_service._normalize_language("English") == "en"
+    assert transcription_service._normalize_language("hindi") == "hi"
+    assert transcription_service._normalize_language("HI") == "hi"
+
+
+def test_no_stale_transcript_reuse_on_new_audio(client):
+    """Verify that transcribing distinct audio inputs yields distinct transcripts and doesn't return stale text."""
+    # Audio 1: Chest pain
+    audio1 = b"MOCK_TRANSCRIPT: severe chest pain radiating to jaw"
+    resp1 = client.post(
+        "/transcribe-audio",
+        files={"file": ("cardiac.wav", io.BytesIO(audio1), "audio/wav")}
+    )
+    assert resp1.status_code == 200
+    data1 = resp1.json()
+    assert "chest pain" in data1["transcript"].lower()
+
+    # Audio 2: Cough & cold
+    audio2 = b"MOCK_TRANSCRIPT: mild fever and dry cough for 3 days"
+    resp2 = client.post(
+        "/transcribe-audio",
+        files={"file": ("cough.wav", io.BytesIO(audio2), "audio/wav")}
+    )
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert "dry cough" in data2["transcript"].lower()
+
+    # Transcripts must not be identical
+    assert data1["transcript"] != data2["transcript"]
 
 
