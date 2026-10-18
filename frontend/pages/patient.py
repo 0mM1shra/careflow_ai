@@ -170,12 +170,59 @@ UI_TEXT = {
         "confirm_body": "आपके उत्तर और अपलोड किए गए मेडिकल दस्तावेज़ क्लिनिकल समीक्षक डैशबोर्ड पर सुरक्षित रूप से स्थानांतरित कर दिए गए हैं। एक पंजीकृत चिकित्सक आपके केस और सारांश की समीक्षा करेंगे।",
         "safety_reminder": "<strong>महत्वपूर्ण सुरक्षा चेतावनी:</strong> CareFlow एक स्वचालित क्लिनिकल सहायक प्रोटोटाइप है। यह कोई चिकित्सा निदान (डायग्नोसिस) नहीं करता है। यदि आपके लक्षण बिगड़ते हैं या आपको सीने में तेज़ दर्द अथवा सांस लेने में तकलीफ़ होती है, तो तुरंत आपातकालीन चिकित्सा सहायता लें।",
         "restart_btn": "नया इनटेक शुरू करें"
+    },
+    "Auto-detect / Hinglish": {
+        "title": "🩺 CareFlow Clinical Intake",
+        "subtitle": "Private & Confidential Multilingual Clinical Intake (English / Hindi / Hinglish)",
+        "privacy_title": "🛡️ Privacy Protection Notice:",
+        "privacy_body": "Please do <strong>NOT</strong> enter your name, phone number, address, or Aadhaar number. A confidential Case ID will be assigned to your session.",
+        "emergency_title": "🚨 POTENTIAL MEDICAL EMERGENCY DETECTED:",
+        "emergency_body": "If you have severe chest pain, breathing difficulty, sudden weakness, or emergency symptoms, <strong>call 112 / 911 or go to the nearest emergency room immediately.</strong> Do not wait for online clinical review.",
+        "start_title": "Begin New Clinical Intake (नया इनटेक शुरू करें)",
+        "lang_label": "Preferred Language / भाषा चुनें",
+        "complaint_label": "What symptoms or health concerns are you experiencing today? / आज क्या तकलीफ है?",
+        "complaint_placeholder": "Type or speak in English, Hindi (हिन्दी), or Hinglish (e.g. 2 din se severe chest pain aur bukhar hai...)",
+        "doc_upload_header": "📄 Attach Medical Document or Prescription (Optional)",
+        "doc_upload_help": "Upload an image (PNG, JPG) or PDF of a prescription, lab test, or clinical report. Key clinical facts will be scanned automatically.",
+        "doc_extracted_alert": "✅ Medical document parsed and attached to your clinical record.",
+        "start_btn": "Start Intake Assessment →",
+        "case_id_label": "Case ID",
+        "question_count": "Question {curr} of {max}",
+        "you_label": "You",
+        "assistant_label": "CareFlow Assistant",
+        "q_label": "CareFlow Follow-Up Question:",
+        "input_label": "Your Response / आपका उत्तर:",
+        "input_placeholder": "Type in English, Hindi, or Hinglish...",
+        "send_btn": "Send Response 💬",
+        "skip_btn": "Skip ⏩",
+        "unknown_btn": "I Don't Know ❓",
+        "early_submit_btn": "Finish & Review Now (Submit Early) 📋",
+        "upload_during_chat": "📎 Attach Medical Document / Lab Report (PDF or Image)",
+        "upload_btn": "Attach Document 📤",
+        "voice_header": "🎤 Voice Input (Record or Upload Audio)",
+        "voice_help": "Record symptoms in English, Hindi (हिन्दी), or Hinglish. You will review and edit the transcript before sending.",
+        "voice_transcript_title": "🎤 Voice Transcript (Review & Edit before sending):",
+        "voice_confirm_btn": "Confirm & Send Voice Response 💬",
+        "voice_discard_btn": "Discard Recording ❌",
+        "doc_preview_title": "📄 Attached Medical Document:",
+        "doc_confirm_btn": "Confirm & Ingest Document 📋",
+        "doc_discard_btn": "Remove Document ❌",
+        "review_title": "Review Your Intake Information",
+        "review_subtitle": "Please review the information you provided. You may correct or add details before submitting for clinician review.",
+        "submit_btn": "Submit Intake for Healthcare Professional Review ✅",
+        "return_btn": "← Return to Questions",
+        "success_title": "🎉 Your clinical intake has been successfully submitted!",
+        "confirm_card_title": "Intake Confirmation",
+        "confirm_status": "Queued for Registered Healthcare Professional Review",
+        "confirm_body": "Your responses and uploaded medical documentation have been securely transferred to the clinical reviewer dashboard. A registered medical reviewer will inspect your case notes and clinical summary.",
+        "safety_reminder": "<strong>Important Safety Reminder:</strong> CareFlow is an automated clinical assistant prototype. It does not diagnose medical conditions. If your symptoms worsen, seek emergency medical care immediately.",
+        "restart_btn": "Start Another Patient Intake"
     }
 }
 
 # Initialize Session State
 if "selected_lang" not in st.session_state:
-    st.session_state.selected_lang = "English"
+    st.session_state.selected_lang = "Auto-detect / Hinglish"
 if "case_id" not in st.session_state:
     st.session_state.case_id = None
 if "intake_step" not in st.session_state:
@@ -200,19 +247,34 @@ if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
 # Language selector bar in sidebar / top
+lang_options = ["Auto-detect / Hinglish", "English", "हिन्दी (Hindi)"]
 with st.sidebar:
     st.markdown("### 🌐 Language / भाषा")
+    curr_idx = 0
+    if st.session_state.selected_lang in lang_options:
+        curr_idx = lang_options.index(st.session_state.selected_lang)
     chosen_lang = st.radio(
-        "Interface & Conversation Language:",
-        options=["English", "हिन्दी (Hindi)"],
-        index=0 if st.session_state.selected_lang == "English" else 1,
+        "Interface & Speech Mode:",
+        options=lang_options,
+        index=curr_idx,
         key="lang_radio"
     )
     if chosen_lang != st.session_state.selected_lang:
         st.session_state.selected_lang = chosen_lang
         st.rerun()
 
-t = UI_TEXT[st.session_state.selected_lang]
+t = UI_TEXT.get(st.session_state.selected_lang, UI_TEXT["English"])
+
+# Determine backend language and Whisper ASR language parameter
+if "Hindi" in st.session_state.selected_lang and "Hinglish" not in st.session_state.selected_lang:
+    backend_lang = "Hindi"
+    asr_lang = "hi"
+elif st.session_state.selected_lang == "English":
+    backend_lang = "English"
+    asr_lang = "en"
+else:
+    backend_lang = "Hinglish"
+    asr_lang = None  # Auto-detect Hinglish mixed vocabulary
 
 # Header
 st.markdown(f"""
@@ -244,7 +306,6 @@ if st.session_state.is_emergency:
 # =====================================================================
 if st.session_state.intake_step == "start":
     st.subheader(t["start_title"])
-    backend_lang = "Hindi" if "Hindi" in st.session_state.selected_lang else "English"
 
     # CASE A: PENDING INITIAL VOICE TRANSCRIPT REVIEW
     if st.session_state.pending_voice_start is not None:
@@ -253,13 +314,16 @@ if st.session_state.intake_step == "start":
         p_lang = pv.get("language", backend_lang)
         p_conf = pv.get("confidence")
         conf_pct = int(p_conf * 100) if p_conf is not None else 0
-        conf_status = "High confidence" if (p_conf or 0) >= 0.70 else "⚠️ Lower confidence — please verify accuracy"
+        conf_status = "Good acoustic signal" if (p_conf or 0) >= 0.70 else "⚠️ Lower acoustic confidence — please verify accuracy"
 
         st.markdown(f"""
         <div style="background-color: #F5F3FF; border: 2px solid #C4B5FD; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
             <h4 style="margin: 0 0 6px 0; color: #5B21B6; font-size: 15px;">{t['voice_transcript_title']}</h4>
             <div style="font-size: 13px; color: #6D28D9;">
-                Detected: <strong>{p_lang.title() if p_lang else 'Auto'}</strong> | Acoustic Confidence: <strong>{conf_pct}% ({conf_status})</strong>
+                Language: <strong>{p_lang.title() if p_lang else 'Auto-detect'}</strong> | Estimated Confidence: <strong>~{conf_pct}% ({conf_status})</strong>
+            </div>
+            <div style="font-size: 11.5px; color: #7C3AED; margin-top: 4px;">
+                ℹ️ <em>Confidence is an automated acoustic estimate, not a guarantee of medical accuracy. Please review and edit your words below.</em>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -363,21 +427,25 @@ if st.session_state.intake_step == "start":
 
         chosen_start_audio = rec_audio_start or upl_audio_start
         if chosen_start_audio is not None:
+            audio_bytes = chosen_start_audio.getvalue()
+            curr_hash = hashlib.sha256(audio_bytes).hexdigest()
+            if st.session_state.pending_voice_start and st.session_state.get("last_start_voice_hash") != curr_hash:
+                st.session_state.pending_voice_start = None
+                st.session_state.pop("voice_transcript_start_edit", None)
+
             if st.button("Transcribe Initial Voice 🎙️", type="secondary", key="btn_transcribe_start", use_container_width=True):
                 with st.spinner("Transcribing voice audio..."):
                     try:
-                        audio_bytes = chosen_start_audio.getvalue()
-                        audio_hash = hashlib.sha256(audio_bytes).hexdigest()
                         fname = getattr(chosen_start_audio, "name", "recording.wav") or "recording.wav"
                         t_res = api_client.transcribe_audio(
                             file_bytes=audio_bytes,
                             filename=fname,
-                            language=None  # Auto-detect English, Hindi, or Hinglish
+                            language=asr_lang
                         )
-                        t_res["audio_hash"] = audio_hash
+                        t_res["audio_hash"] = curr_hash
                         st.session_state.pending_voice_start = t_res
                         st.session_state["voice_transcript_start_edit"] = t_res.get("transcript", "")
-                        st.session_state["last_start_voice_hash"] = audio_hash
+                        st.session_state["last_start_voice_hash"] = curr_hash
                         st.rerun()
                     except Exception as e:
                         st.error(f"Voice transcription error: {e}")
@@ -501,13 +569,16 @@ elif st.session_state.intake_step == "chatting":
         p_lang = pv.get("language", backend_lang)
         p_conf = pv.get("confidence")
         conf_pct = int(p_conf * 100) if p_conf is not None else 0
-        conf_status = "High confidence" if (p_conf or 0) >= 0.70 else "⚠️ Lower confidence — please verify accuracy"
+        conf_status = "Good acoustic signal" if (p_conf or 0) >= 0.70 else "⚠️ Lower acoustic confidence — please verify accuracy"
 
         st.markdown(f"""
         <div style="background-color: #F5F3FF; border: 2px solid #C4B5FD; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
             <h4 style="margin: 0 0 6px 0; color: #5B21B6; font-size: 15px;">{t['voice_transcript_title']}</h4>
             <div style="font-size: 13px; color: #6D28D9;">
-                Detected: <strong>{p_lang.title() if p_lang else 'Auto'}</strong> | Acoustic Confidence: <strong>{conf_pct}% ({conf_status})</strong>
+                Language: <strong>{p_lang.title() if p_lang else 'Auto-detect'}</strong> | Estimated Confidence: <strong>~{conf_pct}% ({conf_status})</strong>
+            </div>
+            <div style="font-size: 11.5px; color: #7C3AED; margin-top: 4px;">
+                ℹ️ <em>Confidence is an automated acoustic estimate, not a guarantee of medical accuracy. Please review and edit your words below.</em>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -571,78 +642,7 @@ elif st.session_state.intake_step == "chatting":
                 st.rerun()
 
     # -------------------------------------------------------------
-    # CASE B: PENDING DOCUMENT OCR REVIEW (Human-in-the-loop)
-    # -------------------------------------------------------------
-    elif st.session_state.pending_doc_preview is not None:
-        pd = st.session_state.pending_doc_preview
-        doc_text = pd.get("extracted_text", "")
-        doc_fname = pd.get("filename", "document")
-        doc_chars = pd.get("char_count", 0)
-        doc_engine = pd.get("ocr_engine", "unknown")
-        doc_conf = pd.get("confidence", 1.0)
-
-        st.markdown(f"""
-        <div style="background-color: #F0FDF4; border: 2px solid #86EFAC; border-radius: 8px; padding: 14px; margin-bottom: 12px;">
-            <h4 style="margin: 0 0 6px 0; color: #166534; font-size: 15px;">{t['doc_preview_title']}</h4>
-            <div style="font-size: 13px; color: #15803D;">
-                File: <strong>{doc_fname}</strong> | Engine: <code>{doc_engine}</code> | Length: <strong>{doc_chars} chars</strong>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        edited_doc_text = st.text_area(
-            "Review or edit extracted medical report findings before ingesting:",
-            value=doc_text,
-            key="doc_ocr_edit",
-            height=140
-        )
-        col_d1, col_d2 = st.columns([2, 1])
-        with col_d1:
-            if st.button(t["doc_confirm_btn"], type="primary", key="btn_confirm_doc", use_container_width=True):
-                if edited_doc_text.strip():
-                    with st.spinner("Ingesting verified document findings..."):
-                        try:
-                            content_str = f"[Verified Medical Report: {doc_fname}]\n{edited_doc_text.strip()}"
-                            send_res = api_client.send_message(
-                                case_id=st.session_state.case_id,
-                                content=content_str,
-                                source_type="ocr",
-                                transcription_confidence=doc_conf,
-                                is_confirmed=True
-                            )
-                            st.session_state.uploaded_docs.append({
-                                "name": doc_fname,
-                                "char_count": len(edited_doc_text),
-                                "ocr_preview": edited_doc_text[:200]
-                            })
-                            st.session_state.messages.append({
-                                "role": "patient",
-                                "content": content_str,
-                                "source_type": "ocr"
-                            })
-                            if send_res.get("is_emergency"):
-                                st.session_state.is_emergency = True
-                            st.session_state.pending_doc_preview = None
-
-                            q_res = api_client.get_next_question(st.session_state.case_id)
-                            st.session_state.turn_count += 1
-                            if q_res.get("is_terminal") or not q_res.get("next_question") or st.session_state.turn_count > st.session_state.max_turns:
-                                st.session_state.intake_step = "review_edit"
-                            else:
-                                st.session_state.current_question = q_res["next_question"]
-                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error ingesting document text: {e}")
-                else:
-                    st.warning("Please retain some text or discard.")
-        with col_d2:
-            if st.button(t["doc_discard_btn"], key="btn_discard_doc", use_container_width=True):
-                st.session_state.pending_doc_preview = None
-                st.rerun()
-
-    # -------------------------------------------------------------
-    # CASE C: STANDARD PATIENT INPUT (Typed / Voice / Report OCR)
+    # CASE B: STANDARD PATIENT INPUT (Typed / Voice / Report OCR)
     # -------------------------------------------------------------
     else:
         # Patient Typed Answer Form
@@ -716,16 +716,20 @@ elif st.session_state.intake_step == "chatting":
                 )
                 chosen_audio = rec_audio or upl_audio
                 if chosen_audio is not None:
+                    audio_bytes = chosen_audio.getvalue()
+                    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+                    if st.session_state.pending_voice and st.session_state.get("last_voice_hash") != audio_hash:
+                        st.session_state.pending_voice = None
+                        st.session_state.pop("voice_transcript_edit", None)
+
                     if st.button("Transcribe Audio 🎙️", type="primary", key="btn_run_transcribe", use_container_width=True):
                         with st.spinner("Transcribing voice recording..."):
                             try:
-                                audio_bytes = chosen_audio.getvalue()
-                                audio_hash = hashlib.sha256(audio_bytes).hexdigest()
                                 fname = getattr(chosen_audio, "name", "recording.wav") or "recording.wav"
                                 t_res = api_client.transcribe_audio(
                                     file_bytes=audio_bytes,
                                     filename=fname,
-                                    language=None  # Auto-detect English, Hindi, or Hinglish
+                                    language=asr_lang
                                 )
                                 t_res["audio_hash"] = audio_hash
                                 st.session_state.pending_voice = t_res
@@ -737,26 +741,52 @@ elif st.session_state.intake_step == "chatting":
 
         with col_exp2:
             with st.expander(t["upload_during_chat"], expanded=False):
-                st.caption("Upload prescription or report image/PDF for preview before adding to record.")
+                st.caption("Upload prescription or report image/PDF to attach to your record.")
                 doc_in_chat = st.file_uploader(
-                    "Upload image/PDF (PNG, JPG, PDF)",
+                    "Upload image or PDF (PNG, JPG, PDF)",
                     type=["pdf", "png", "jpg", "jpeg", "webp"],
                     key="doc_chat"
                 )
                 if doc_in_chat is not None:
-                    if st.button("Extract & Preview Document Text 🔍", type="secondary", key="btn_run_preview_doc", use_container_width=True):
-                        with st.spinner("Extracting text from medical document..."):
+                    if st.button("Attach & Scan Document 📄", type="secondary", key="btn_run_attach_doc", use_container_width=True):
+                        with st.spinner("Scanning and securely attaching medical document..."):
                             try:
                                 file_bytes = doc_in_chat.getvalue()
-                                preview_res = api_client.preview_document_extraction(
+                                up_res = api_client.upload_document(
                                     case_id=st.session_state.case_id,
                                     file_bytes=file_bytes,
                                     filename=doc_in_chat.name
                                 )
-                                st.session_state.pending_doc_preview = preview_res
+                                c_count = up_res.get("char_count", 0)
+                                engine = up_res.get("engine_used", "winocr")
+                                conf = up_res.get("confidence", 0.9)
+
+                                st.session_state.uploaded_docs.append({
+                                    "name": doc_in_chat.name,
+                                    "char_count": c_count,
+                                    "engine_used": engine,
+                                    "confidence": conf
+                                })
+                                st.session_state.messages.append({
+                                    "role": "patient",
+                                    "content": f"[Attached Medical Document: {doc_in_chat.name} ({c_count} chars extracted via {engine})]",
+                                    "source_type": "ocr"
+                                })
+                                if up_res.get("is_emergency"):
+                                    st.session_state.is_emergency = True
+
+                                # Advance question
+                                q_res = api_client.get_next_question(st.session_state.case_id)
+                                st.session_state.turn_count += 1
+                                if q_res.get("is_terminal") or not q_res.get("next_question") or st.session_state.turn_count > st.session_state.max_turns:
+                                    st.session_state.intake_step = "review_edit"
+                                else:
+                                    st.session_state.current_question = q_res["next_question"]
+                                    st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Error previewing document: {e}")
+                                st.error(f"Error attaching document: {e}")
 
     # Early submission option
     st.write("---")

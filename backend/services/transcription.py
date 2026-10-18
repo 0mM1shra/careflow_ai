@@ -159,9 +159,28 @@ class TranscriptionService:
         if use_mock:
             return self._mock_transcribe(file_bytes, filename, language, model_size)
 
-        # Real faster-whisper execution
+        # Path A: If hosted Whisper endpoint is configured, try it first
+        if settings.WHISPER_ENDPOINT or asr_mode == "hosted":
+            hosted_res = self._hosted_transcribe(file_bytes, filename, language, model_size)
+            if hosted_res:
+                return hosted_res
+            if asr_mode == "hosted":
+                raise TranscriptionError(f"Hosted Whisper endpoint '{settings.WHISPER_ENDPOINT}' failed.")
+
+        # Path B: Local faster-whisper execution
         whisper_model = self._get_whisper_model(model_size, device)
         normalized_lang = self._normalize_language(language)
+
+        # Domain prompt hints to guide Hindi/Hinglish clinical vocabulary
+        initial_prompt = (
+            "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
+            if normalized_lang == "hi"
+            else (
+                "Patient symptoms: chest pain, shortness of breath, fever, headache, vomiting blood, abdominal pain, nausea."
+                if normalized_lang == "en"
+                else "CareFlow intake: bukhar, sar dard, chest pain, ulti, saans lene me takleef, pet me dard, weakness."
+            )
+        )
 
         # Create temporary file for audio
         temp_dir = settings.CAREFLOW_TEMP_DIR if settings.CAREFLOW_TEMP_DIR else None
@@ -175,6 +194,7 @@ class TranscriptionService:
             segments_generator, info = whisper_model.transcribe(
                 temp_path,
                 language=normalized_lang,
+                initial_prompt=initial_prompt,
                 beam_size=5,
                 vad_filter=True
             )
@@ -223,6 +243,52 @@ class TranscriptionService:
                     os.remove(temp_path)
                 except Exception as clean_err:
                     logger.warning(f"Failed to remove temp audio file {temp_path}: {clean_err}")
+
+    def _hosted_transcribe(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        language: Optional[str] = None,
+        model_size: Optional[str] = None
+    ) -> Optional[TranscriptionResult]:
+        """Calls an optional hosted Whisper-compatible API endpoint if configured."""
+        endpoint = settings.WHISPER_ENDPOINT
+        if not endpoint:
+            return None
+
+        try:
+            import requests
+            headers = {}
+            if settings.WHISPER_API_KEY:
+                headers["Authorization"] = f"Bearer {settings.WHISPER_API_KEY}"
+
+            files = {"file": (filename, file_bytes, "audio/wav")}
+            data = {"model": "whisper-1"}
+            norm_lang = self._normalize_language(language)
+            if norm_lang:
+                data["language"] = norm_lang
+
+            resp = requests.post(endpoint, headers=headers, files=files, data=data, timeout=30)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                text = res_data.get("text", "").strip()
+                return TranscriptionResult(
+                    transcript=text,
+                    detected_language=norm_lang or "en",
+                    language_probability=0.95,
+                    confidence=0.92,
+                    duration_seconds=0.0,
+                    model_size=model_size or "hosted",
+                    source_type="voice_transcript",
+                    is_mock=False,
+                    segments=[]
+                )
+            else:
+                logger.warning(f"Hosted Whisper API returned HTTP {resp.status_code}: {resp.text[:150]}")
+                return None
+        except Exception as e:
+            logger.warning(f"Failed calling hosted Whisper endpoint: {e}")
+            return None
 
     def _mock_transcribe(
         self,

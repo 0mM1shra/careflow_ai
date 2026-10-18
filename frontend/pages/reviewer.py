@@ -319,16 +319,26 @@ with col_detail:
 
             # Uploaded Documents & OCR Inspection
             doc_events = [ev for ev in case_data.get("audit_events", []) if ev.get("event_type") == "document_uploaded"]
-            if doc_events:
-                with st.expander(f"📄 Uploaded Medical Documents & OCR Extractions ({len(doc_events)})", expanded=False):
-                    for dev in doc_events:
-                        details = dev.get("details", {})
-                        fname = details.get("filename", "document")
-                        chars = details.get("char_count", 0)
-                        preview = details.get("preview", "")
-                        st.markdown(f"**Document:** `{fname}` ({chars} characters extracted via native OCR)")
-                        if preview:
-                            st.text_area(f"OCR Extracted Content ({fname}):", value=preview, height=100, disabled=True, key=f"ocr_view_{dev.get('id', fname)}")
+            ocr_msgs = [m for m in case_data.get("messages", []) if m.get("source_type") in ("ocr", "ocr_extraction")]
+
+            if doc_events or ocr_msgs:
+                doc_count = max(len(doc_events), len(ocr_msgs))
+                with st.expander(f"📄 Uploaded Medical Documents & OCR Extractions ({doc_count})", expanded=False):
+                    if doc_events:
+                        for dev in doc_events:
+                            details = dev.get("new_value") or dev.get("details") or {}
+                            fname = details.get("filename", "document")
+                            chars = details.get("char_count", 0)
+                            engine = details.get("ocr_engine", "native OCR")
+                            conf = details.get("confidence")
+                            conf_str = f" | Confidence: ~{int(conf * 100)}%" if conf is not None else ""
+                            preview = details.get("preview", "")
+                            st.markdown(f"**Document:** `{fname}` ({chars} characters via <code>{engine}</code>{conf_str})", unsafe_allow_html=True)
+                            if preview:
+                                st.text_area(f"OCR Extracted Content ({fname}):", value=preview, height=110, disabled=True, key=f"ocr_view_{dev.get('id', fname)}")
+                    else:
+                        for m in ocr_msgs:
+                            st.text_area(f"Document Message OCR:", value=m.get("content", ""), height=110, disabled=True, key=f"msg_ocr_{m.get('id')}")
 
             # Warnings / Missing Info / Uncertainties
             missing = case_data.get("missing_information", [])

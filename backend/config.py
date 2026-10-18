@@ -27,9 +27,11 @@ class Settings:
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
 
     # ASR / Voice Transcription Configuration
-    ASR_MODE: str = os.getenv("ASR_MODE", "auto").lower()              # 'auto', 'local', 'mock'
+    ASR_MODE: str = os.getenv("ASR_MODE", "auto").lower()              # 'auto', 'local', 'mock', 'hosted'
     ASR_MODEL_SIZE: str = os.getenv("ASR_MODEL_SIZE", "base").lower()  # 'base', 'tiny', 'small'
     ASR_DEVICE: str = os.getenv("ASR_DEVICE", "cpu").lower()            # 'cpu' or 'cuda'
+    WHISPER_ENDPOINT: str = os.getenv("WHISPER_ENDPOINT", "")          # Optional hosted Whisper API
+    WHISPER_API_KEY: str = os.getenv("WHISPER_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 
     # OCR Engine Configuration: 'auto', 'winocr', 'paddleocr'
     OCR_ENGINE: str = os.getenv("OCR_ENGINE", "auto").lower()

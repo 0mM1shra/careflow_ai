@@ -53,10 +53,10 @@ class DeterministicTriageEngine:
         },
         {
             "id": "RULE-P0-HEM-04",
-            "name": "Severe Hemorrhage or Vascular Collapse",
-            "criterion": "Uncontrolled bleeding, vomiting blood, or sudden syncope with chest/back pain",
-            "pattern": r"(vomiting\s*blood|coughing\s*up\s*blood|uncontrolled\s*bleeding|passed\s*out|syncope|खून\s*की\s*उल्टी|बेहोश|khoon\s*ki\s*ulti|behosh)",
-            "action": "Immediate resuscitation and surgical/trauma evaluation."
+            "name": "Severe Hemorrhage or Hematemesis",
+            "criterion": "Active hematemesis (vomiting blood), coughing up blood, uncontrolled bleeding, or sudden syncope",
+            "pattern": r"(?:vomit(?:ing|ed)?\s*blood|throwing\s*up\s*blood|threw\s*up\s*blood|blood\s*in\s*(?:my\s*)?vomit|hematemesis|coffee[\s\-]ground\s*(?:emesis|vomit)|coughing\s*up\s*blood|hemoptysis|uncontrolled\s*bleeding|passed\s*out|syncope|खून\s*की\s*उल्टी|उल्टी\s*में\s*खून|उल्टी\s*के\s*साथ\s*खून|रक्त\s*वमन|बेहोश|khoon\s*ki\s*ulti|ulti\s*me(?:n)?\s*(?:khoon|blood)|behosh)",
+            "action": "Immediate resuscitation, airway protection, and emergency surgical/endoscopic evaluation."
         },
         {
             "id": "RULE-P0-ANAPH-05",
@@ -103,8 +103,50 @@ class DeterministicTriageEngine:
             "criterion": "Shortness of breath with fever or cough, without immediate collapse",
             "pattern": r"(shortness\s*of\s*breath|trouble\s*breathing|सांस\s*लेने\s*में\s*परेशानी).*(fever|cough|बुखार|खांसी)|(fever|cough|बुखार|खांसी).*(shortness\s*of\s*breath|trouble\s*breathing)",
             "action": "Urgent chest evaluation and pulse oximetry."
+        },
+        {
+            "id": "RULE-P1-GI-06",
+            "name": "Suspected Gastrointestinal Bleeding",
+            "criterion": "Dark black tarry stools (melena) or suspected gastrointestinal bleeding",
+            "pattern": r"(?:black\s*tarry\s*stool|melena|dark\s*black\s*stool|काला\s*मल|kali\s*latrine|latrine\s*me\s*khoon)",
+            "action": "Urgent physician assessment, IV access, and GI endoscopy consultation within 1 to 2 hours."
         }
     ]
+
+    @staticmethod
+    def _is_negated(match: re.Match, text: str) -> bool:
+        """Determines if a matched symptom pattern is explicitly negated in context."""
+        start = match.start()
+        end = match.end()
+        pre_text = text[max(0, start - 45):start].lower()
+        post_text = text[end:min(len(text), end + 35)].lower()
+
+        # If there is a clause boundary before the match, only inspect the current clause
+        clause_break = max(
+            pre_text.rfind("."), pre_text.rfind(";"), pre_text.rfind("!"),
+            pre_text.rfind(" but "), pre_text.rfind(" however "), pre_text.rfind(" lekin "), pre_text.rfind(" par ")
+        )
+        if clause_break != -1:
+            pre_text = pre_text[clause_break:]
+
+        # Prefix negation in English/Hindi/Hinglish
+        if re.search(r"\b(no|not|without|denies|denied|never|none|zero)\b(?:\s+\w+){0,3}\s*$", pre_text.strip()):
+            return True
+        if re.search(r"(नहीं|न|कोई नहीं|बिना)\s*$", pre_text.strip()):
+            return True
+        if re.search(r"\b(nahi|nahin|na)\b(?:\s+\w+){0,2}\s*$", pre_text.strip()):
+            return True
+
+        # Postfix negation in Hindi/Hinglish/English
+        post_clause_break = min(
+            [pos for pos in [post_text.find("."), post_text.find(";"), post_text.find("!"), post_text.find(" but "), post_text.find(" lekin ")] if pos != -1] or [len(post_text)]
+        )
+        post_clause = post_text[:post_clause_break].strip()
+
+        if re.search(r"^\s*(?:nahi\b|nahin\b|nai\b|absent\b|resolved\b|is not present\b|nahi hai|nahin hai|nai hai|नहीं|नहीं है|नहीं हुई|न है)", post_clause):
+            return True
+
+        return False
 
     def evaluate(
         self,
@@ -166,8 +208,9 @@ class DeterministicTriageEngine:
 
         # 3. Check Protocol-Based P0 Emergency Rules
         for rule in self.P0_RULES:
-            match = re.search(rule["pattern"], all_patient_text)
-            if match:
+            for match in re.finditer(rule["pattern"], all_patient_text):
+                if self._is_negated(match, all_patient_text):
+                    continue
                 matched_snippet = match.group(0)
                 source_msg = next((msg for msg in raw_messages if matched_snippet in msg.lower()), matched_snippet)
                 trigger = TriageTrigger(
@@ -181,6 +224,7 @@ class DeterministicTriageEngine:
                 triggered_rules.append(trigger)
                 warning_signs.append(f"{rule['name']}: {rule['criterion']}")
                 reasons.append(f"Triggered {rule['id']} ({rule['name']}): '{source_msg[:90]}'")
+                break
 
         if triggered_rules:
             return TriageResult(
@@ -214,8 +258,9 @@ class DeterministicTriageEngine:
 
         # Evaluate Protocol-Based P1 Rules
         for rule in self.P1_RULES:
-            match = re.search(rule["pattern"], all_patient_text)
-            if match:
+            for match in re.finditer(rule["pattern"], all_patient_text):
+                if self._is_negated(match, all_patient_text):
+                    continue
                 matched_snippet = match.group(0)
                 source_msg = next((msg for msg in raw_messages if matched_snippet in msg.lower()), matched_snippet)
                 
@@ -230,6 +275,7 @@ class DeterministicTriageEngine:
                 triggered_rules.append(trigger)
                 warning_signs.append(f"{rule['name']}: {rule['criterion']}")
                 reasons.append(f"Triggered {rule['id']} ({rule['name']}): '{source_msg[:90]}'")
+                break
 
         # Check if patient directly provided standalone severe pain score (e.g. answering severity question with '8', '9', '10')
         standalone_high_pain = [msg.strip() for msg in raw_messages if msg.strip() in ("8", "9", "10", "8/10", "9/10", "10/10", "10 out of 10", "9 out of 10", "8 out of 10")]

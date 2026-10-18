@@ -397,8 +397,9 @@ async def upload_medical_document(
     if len(file_bytes) > 15 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Uploaded file exceeds maximum allowed size (15 MB).")
 
-    # Run OCR or PDF text extraction
-    extracted_text = ocr_service.extract_text(file_bytes, file.filename)
+    # Run OCR or PDF text extraction with full provenance metadata
+    ocr_res = ocr_service.extract_with_metadata(file_bytes, file.filename)
+    extracted_text = ocr_res.extracted_text
     formatted_content = f"[Uploaded Medical Document ({file.filename}) OCR]:\n{extracted_text}"
 
     # Store in messages
@@ -407,13 +408,31 @@ async def upload_medical_document(
         role="patient",
         content=formatted_content,
         source_type="ocr_extraction",
-        transcription_confidence=1.0,
+        transcription_confidence=ocr_res.confidence,
         is_confirmed=True,
         created_at=datetime.utcnow()
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
+
+    # Record Document Upload Audit Event
+    doc_audit = AuditEvent(
+        case_id=case.id,
+        event_type="document_uploaded",
+        new_value_json=json.dumps({
+            "filename": file.filename,
+            "char_count": len(extracted_text),
+            "ocr_engine": ocr_res.engine_used,
+            "confidence": ocr_res.confidence,
+            "preview": extracted_text[:500]
+        }),
+        reason=f"Patient uploaded medical document '{file.filename}' processed via {ocr_res.engine_used}",
+        actor_role="patient",
+        created_at=datetime.utcnow()
+    )
+    db.add(doc_audit)
+    db.commit()
 
     # Collect all patient messages so far
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
@@ -473,6 +492,8 @@ async def upload_medical_document(
         "filename": file.filename,
         "extracted_text": extracted_text,
         "char_count": len(extracted_text),
+        "engine_used": ocr_res.engine_used,
+        "confidence": ocr_res.confidence,
         "interim_priority": triage_res.priority_category,
         "warning_signs": triage_res.warning_signs,
         "is_emergency": triage_res.priority_category == "P0"
@@ -534,9 +555,12 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
     if not patient_msgs:
         raise HTTPException(status_code=400, detail="Cannot submit a case with no patient messages")
 
-    # 1. Generate Clinical Summary
+    # 1. Load Evidence State Facts
+    evidence_st = json.loads(case.evidence_state_json or "{}")
+
+    # 2. Generate Clinical Summary with preserved structured evidence facts
     try:
-        summary_obj = clinical_summarization_service.generate_summary(patient_msgs)
+        summary_obj = clinical_summarization_service.generate_summary(patient_msgs, evidence_state=evidence_st)
         case.ai_summary_json = json.dumps(summary_obj.model_dump())
         case.ai_status = "ready"
     except Exception as e:
@@ -550,8 +574,7 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
             "uncertainties": ["Model unavailable"]
         })
 
-    # 2. Apply Deterministic Triage Rules
-    evidence_st = json.loads(case.evidence_state_json or "{}")
+    # 3. Apply Deterministic Triage Rules
     triage_res = triage_engine.evaluate(
         evidence_state=evidence_st,
         raw_messages=patient_msgs,
