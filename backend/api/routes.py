@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 from backend.services.ocr_service import ocr_service
+from backend.services.transcription import transcription_service, TranscriptionError
+from backend.schemas.multilingual import TranscriptionResult, DocumentExtractionResult
 
 from backend.database.db import get_db
 from backend.database.models import Case, Message, Evidence, AuditEvent
@@ -47,14 +49,10 @@ def health_check(db: Session = Depends(get_db)):
     """Reports backend, database, and MedGemma readiness."""
     db_status = "ok"
     try:
-        db.execute("SELECT 1")
-    except Exception:
-        # For SQLAlchemy 2.0 raw select
-        try:
-            from sqlalchemy import text
-            db.execute(text("SELECT 1"))
-        except Exception as e:
-            db_status = f"unhealthy: {e}"
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+    except Exception as e:
+        db_status = f"unhealthy: {e}"
 
     model_info = medgemma_service.get_status()
 
@@ -74,12 +72,30 @@ def health_check(db: Session = Depends(get_db)):
 def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     """Creates a new patient intake case with a random, non-identifying ID."""
     case_id = _generate_case_id()
+    init_priority = "P3"
+    init_reasons = []
+    init_missing = []
+    init_uncertainties = []
+    if req.chief_complaint and req.chief_complaint.strip():
+        initial_triage = triage_engine.evaluate(
+            evidence_state={"facts": {"chief_complaint": req.chief_complaint.strip()}},
+            raw_messages=[req.chief_complaint.strip()],
+            ai_status="ready"
+        )
+        init_priority = initial_triage.priority_category
+        init_reasons = initial_triage.reasons
+        init_missing = initial_triage.missing_information
+        init_uncertainties = initial_triage.uncertainties
+
     new_case = Case(
         id=case_id,
         preferred_language=req.preferred_language,
         chief_complaint=req.chief_complaint,
         ai_status="pending",
-        priority_category="P3",
+        priority_category=init_priority,
+        priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
+        missing_information_json=json.dumps(init_missing) if init_missing else None,
+        uncertainties_json=json.dumps(init_uncertainties) if init_uncertainties else None,
         review_status="pending",
         triage_rule_version=settings.TRIAGE_RULE_VERSION,
         created_at=datetime.utcnow(),
@@ -91,7 +107,11 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     audit = AuditEvent(
         case_id=case_id,
         event_type="case_created",
-        new_value_json=json.dumps({"preferred_language": req.preferred_language, "chief_complaint": req.chief_complaint}),
+        new_value_json=json.dumps({
+            "preferred_language": req.preferred_language,
+            "chief_complaint": req.chief_complaint,
+            "initial_priority": init_priority
+        }),
         reason="Patient initiated new intake session",
         actor_role="patient",
         created_at=datetime.utcnow()
@@ -180,6 +200,72 @@ def get_case(case_id: str, db: Session = Depends(get_db)):
 
 
 # -------------------------------------------------------------
+# Multilingual Audio Transcription & Document OCR Preview
+# -------------------------------------------------------------
+@router.post("/transcribe-audio", response_model=TranscriptionResult)
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    language: Optional[str] = Query(None, description="Optional ISO language code, e.g. 'en', 'hi'"),
+    model_size: Optional[str] = Query(None, description="ASR model size: 'base' or 'tiny'")
+):
+    """
+    Transcribes audio input into text with detected language and confidence.
+    Does NOT automatically create a message or modify clinical state.
+    Allows patient review, editing, and explicit confirmation before submission.
+    """
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+    try:
+        result = transcription_service.transcribe_audio(
+            file_bytes=file_bytes,
+            filename=file.filename or "recording.wav",
+            language=language,
+            model_size=model_size
+        )
+        return result
+    except TranscriptionError as te:
+        raise HTTPException(status_code=400, detail=str(te))
+    except Exception as e:
+        logger.error(f"Audio transcription service error: {e}")
+        raise HTTPException(status_code=500, detail=f"Audio transcription failed: {e}")
+
+
+@router.post("/cases/{case_id}/extract-document", response_model=DocumentExtractionResult)
+async def preview_document_extraction(
+    case_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Extracts text from an uploaded medical report or prescription image/PDF
+    WITHOUT committing it to the clinical case transcript.
+    Enables patient review and editing of extracted findings before ingestion.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    allowed_extensions = {"png", "jpg", "jpeg", "webp", "bmp", "tiff", "pdf", "txt", "csv", "json"}
+    ext = file.filename.lower().split(".")[-1] if file.filename and "." in file.filename else ""
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Allowed extensions: {', '.join(sorted(allowed_extensions))}"
+        )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(file_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Uploaded file exceeds maximum allowed size (15 MB).")
+
+    result = ocr_service.extract_with_metadata(file_bytes, file.filename)
+    return result
+
+
+# -------------------------------------------------------------
 # Conversational Intake & Extraction
 # -------------------------------------------------------------
 @router.post("/cases/{case_id}/messages")
@@ -187,16 +273,26 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     """
     Appends a patient message, runs clinical extraction, updates evidence state,
     and runs interim triage to detect emergency red flags immediately.
+    Preserves source modality (typed, voice_transcript, ocr_extraction) and confidence.
     """
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
 
-    # Store verbatim message in SQLite
+    content_clean = req.content.strip() if req.content else ""
+    if not content_clean:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty or whitespace only.")
+
+    # Store verbatim message in SQLite with modality provenance
     msg = Message(
         case_id=case_id,
         role="patient",
-        content=req.content.strip(),
+        content=content_clean,
+        raw_transcript=req.raw_transcript,
+        source_type=req.source_type or "patient_typed",
+        source_language=req.source_language,
+        transcription_confidence=req.transcription_confidence,
+        is_confirmed=req.is_confirmed if req.is_confirmed is not None else True,
         created_at=datetime.utcnow()
     )
     db.add(msg)
@@ -205,7 +301,7 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
     # Set chief complaint if empty
     if not case.chief_complaint:
-        case.chief_complaint = req.content.strip()
+        case.chief_complaint = content_clean
 
     # Collect all patient messages so far
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
@@ -222,11 +318,16 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
             actor_role="ai_system"
         )
         case.ai_status = "ready"
+        db.commit()
     except Exception as e:
         logger.error(f"Error during extraction for case {case_id}: {e}")
-        case.ai_status = "failed"
-        case.priority_category = "ERR"
-        db.commit()
+        db.rollback()
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.ai_status = "failed"
+            case.priority_category = "ERR"
+            case.priority_reasons_json = json.dumps([f"Clinical extraction error: {type(e).__name__}"])
+            db.commit()
 
     # Interim Red-Flag Check: Emergency warning must NOT be delayed while questioning continues
     current_evidence = json.loads(case.evidence_state_json or "{}")
@@ -236,11 +337,26 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         ai_status=case.ai_status
     )
     
-    # If P0 is triggered immediately, update case priority so emergency alerts trigger
-    if triage_res.priority_category == "P0":
+    # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
+    new_p = triage_res.priority_category
+    curr_p = case.priority_category
+
+    if curr_p == "P0" or new_p == "P0":
         case.priority_category = "P0"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
+    elif curr_p == "P1" or new_p == "P1":
+        case.priority_category = "P1"
+    elif curr_p == "P2" or new_p == "P2":
+        case.priority_category = "P2"
+    elif new_p == "ERR" or case.ai_status == "failed":
+        case.priority_category = "ERR"
+    else:
+        case.priority_category = new_p
+
+    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    case.missing_information_json = json.dumps(triage_res.missing_information)
+    case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    case.updated_at = datetime.utcnow()
+    db.commit()
 
     return {
         "status": "success",
@@ -266,12 +382,24 @@ async def upload_medical_document(
     if not case:
         raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
 
+    # Validate file extension
+    allowed_extensions = {"png", "jpg", "jpeg", "webp", "bmp", "tiff", "pdf", "txt", "csv", "json"}
+    ext = file.filename.lower().split(".")[-1] if file.filename and "." in file.filename else ""
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Allowed extensions: {', '.join(sorted(allowed_extensions))}"
+        )
+
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(file_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Uploaded file exceeds maximum allowed size (15 MB).")
 
-    # Run OCR or PDF text extraction
-    extracted_text = ocr_service.extract_text(file_bytes, file.filename)
+    # Run OCR or PDF text extraction with full provenance metadata
+    ocr_res = ocr_service.extract_with_metadata(file_bytes, file.filename)
+    extracted_text = ocr_res.extracted_text
     formatted_content = f"[Uploaded Medical Document ({file.filename}) OCR]:\n{extracted_text}"
 
     # Store in messages
@@ -279,11 +407,32 @@ async def upload_medical_document(
         case_id=case_id,
         role="patient",
         content=formatted_content,
+        source_type="ocr_extraction",
+        transcription_confidence=ocr_res.confidence,
+        is_confirmed=True,
         created_at=datetime.utcnow()
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
+
+    # Record Document Upload Audit Event
+    doc_audit = AuditEvent(
+        case_id=case.id,
+        event_type="document_uploaded",
+        new_value_json=json.dumps({
+            "filename": file.filename,
+            "char_count": len(extracted_text),
+            "ocr_engine": ocr_res.engine_used,
+            "confidence": ocr_res.confidence,
+            "preview": extracted_text[:500]
+        }),
+        reason=f"Patient uploaded medical document '{file.filename}' processed via {ocr_res.engine_used}",
+        actor_role="patient",
+        created_at=datetime.utcnow()
+    )
+    db.add(doc_audit)
+    db.commit()
 
     # Collect all patient messages so far
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
@@ -296,14 +445,19 @@ async def upload_medical_document(
             case=case,
             extraction=extraction,
             source_message=msg,
-            actor_role="patient"
+            actor_role="ai_system"
         )
         case.ai_status = "ready"
+        db.commit()
     except Exception as e:
         logger.error(f"Error during extraction for uploaded document in case {case_id}: {e}")
-        case.ai_status = "failed"
-        case.priority_category = "ERR"
-        db.commit()
+        db.rollback()
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.ai_status = "failed"
+            case.priority_category = "ERR"
+            case.priority_reasons_json = json.dumps([f"Document extraction error: {type(e).__name__}"])
+            db.commit()
 
     # Interim Red-Flag Check
     current_evidence = json.loads(case.evidence_state_json or "{}")
@@ -312,16 +466,34 @@ async def upload_medical_document(
         raw_messages=all_msgs,
         ai_status=case.ai_status
     )
-    if triage_res.priority_category == "P0":
+    # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
+    new_p = triage_res.priority_category
+    curr_p = case.priority_category
+
+    if curr_p == "P0" or new_p == "P0":
         case.priority_category = "P0"
-        case.priority_reasons_json = json.dumps(triage_res.reasons)
-        db.commit()
+    elif curr_p == "P1" or new_p == "P1":
+        case.priority_category = "P1"
+    elif curr_p == "P2" or new_p == "P2":
+        case.priority_category = "P2"
+    elif new_p == "ERR" or case.ai_status == "failed":
+        case.priority_category = "ERR"
+    else:
+        case.priority_category = new_p
+
+    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    case.missing_information_json = json.dumps(triage_res.missing_information)
+    case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    case.updated_at = datetime.utcnow()
+    db.commit()
 
     return {
         "status": "success",
         "filename": file.filename,
         "extracted_text": extracted_text,
         "char_count": len(extracted_text),
+        "engine_used": ocr_res.engine_used,
+        "confidence": ocr_res.confidence,
         "interim_priority": triage_res.priority_category,
         "warning_signs": triage_res.warning_signs,
         "is_emergency": triage_res.priority_category == "P0"
@@ -348,7 +520,8 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
         patient_messages=patient_msgs,
         current_question_count=turn_count,
         assistant_messages=assistant_msgs,
-        evidence_state=evidence_st
+        evidence_state=evidence_st,
+        preferred_language=case.preferred_language or "English"
     )
 
     # If a question was generated, store it in messages
@@ -382,9 +555,12 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
     if not patient_msgs:
         raise HTTPException(status_code=400, detail="Cannot submit a case with no patient messages")
 
-    # 1. Generate Clinical Summary
+    # 1. Load Evidence State Facts
+    evidence_st = json.loads(case.evidence_state_json or "{}")
+
+    # 2. Generate Clinical Summary with preserved structured evidence facts
     try:
-        summary_obj = clinical_summarization_service.generate_summary(patient_msgs)
+        summary_obj = clinical_summarization_service.generate_summary(patient_msgs, evidence_state=evidence_st)
         case.ai_summary_json = json.dumps(summary_obj.model_dump())
         case.ai_status = "ready"
     except Exception as e:
@@ -398,17 +574,35 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
             "uncertainties": ["Model unavailable"]
         })
 
-    # 2. Apply Deterministic Triage Rules
-    evidence_st = json.loads(case.evidence_state_json or "{}")
+    # 3. Apply Deterministic Triage Rules
     triage_res = triage_engine.evaluate(
         evidence_state=evidence_st,
         raw_messages=patient_msgs,
         ai_status=case.ai_status
     )
 
-    # 3. Store Triage & Queue Attributes
-    case.priority_category = triage_res.priority_category
-    case.priority_reasons_json = json.dumps(triage_res.reasons)
+    # 3. Store Triage & Queue Attributes with Escalation Preservation
+    final_priority = triage_res.priority_category
+    final_reasons = list(triage_res.reasons)
+
+    if case.ai_status == "failed" or triage_res.priority_category == "ERR":
+        final_priority = "ERR"
+    else:
+        # P0/P1 emergency escalation cannot be downgraded upon final case submission
+        existing_p = case.priority_category
+        existing_reasons = json.loads(case.priority_reasons_json or "[]")
+        if existing_p == "P0" and final_priority != "P0":
+            final_priority = "P0"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+        elif existing_p == "P1" and final_priority in ("P2", "P3"):
+            final_priority = "P1"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+        elif existing_p == "P2" and final_priority == "P3" and (triage_res.uncertainties or evidence_st.get("contradictions")):
+            final_priority = "P2"
+            final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
+
+    case.priority_category = final_priority
+    case.priority_reasons_json = json.dumps(final_reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
     case.review_status = "pending"
