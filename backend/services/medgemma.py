@@ -282,7 +282,7 @@ class MedGemmaService:
         contradictions = []
         uncertainties = []
 
-        # Symptom detection (Multilingual: English, Hindi, Hinglish)
+        # Symptom detection (Multilingual: English, Hindi, Hinglish across 20+ clinical domains)
         symptom_patterns = [
             ("chest pain", ["chest pain", "pressure in chest", "chest tightness", "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain", "dil me dard", "dil me bahut dard", "dil me pain", "दिल में दर्द", "lower chest is paining", "tightness in chest"]),
             ("shortness of breath", ["shortness of breath", "trouble breathing", "dyspnea", "breathless", "सांस लेने में तकलीफ", "दम फूलना", "सांस फूलना", "saans lene me takleef", "dam phoolna"]),
@@ -292,8 +292,18 @@ class MedGemmaService:
             ("sore throat", ["sore throat", "throat hurts", "गले में खराश", "गले में दर्द", "gale me dard", "gala kharab"]),
             ("abdominal pain", ["abdominal pain", "stomach ache", "belly pain", "stomach pain", "पेट में दर्द", "पेट दर्द", "pet dard", "pet me dard"]),
             ("nausea and vomiting", ["nausea", "vomiting", "threw up", "throwing up", "उल्टी", "जी मिचलाना", "ulti", "vomit"]),
-            ("dizziness", ["dizziness", "dizzy", "lightheaded", "चक्कर", "chakkar"]),
-            ("rash", ["rash", "skin redness", "hives", "itching", "खुजली", "चकत्ते", "khujli"]),
+            ("hematemesis", ["vomiting blood", "threw up blood", "throwing up blood", "blood in vomit", "hematemesis", "coffee ground", "खून की उल्टी", "उल्टी में खून", "khoon ki ulti", "ulti me khoon"]),
+            ("dizziness", ["dizziness", "dizzy", "lightheaded", "vertigo", "spinning", "चक्कर", "chakkar"]),
+            ("rash", ["rash", "skin redness", "hives", "itching", "खुजली", "चकत्ते", "khujli", "blister", "skin peeling"]),
+            ("musculoskeletal trauma", ["ankle", "knee", "fall", "twisted", "sprain", "broken", "fracture", "swollen joint", "leg hurt", "arm hurt", "pair me moch", "chot lagi", "चोट", "मोच", "हड्डी टूट"]),
+            ("dysuria / urinary symptoms", ["urination", "burning urine", "uti", "dysuria", "blood in urine", "peshab me jalan", "peshab me dard", "पेशाब में जलन", "पेशाब में खून"]),
+            ("eye symptoms", ["eye pain", "red eye", "vision", "blurred vision", "eye discharge", "pus in eye", "aankh me dard", "aankh laal", "आंख में दर्द", "आंख लाल"]),
+            ("back pain", ["back pain", "lower back pain", "spine", "sciatica", "kamar dard", "peeth dard", "कमर दर्द", "पीठ में दर्द"]),
+            ("diarrhea", ["diarrhea", "loose motion", "watery stool", "stomach cramps", "dast", "pet kharab", "दस्त", "पेट खराब"]),
+            ("earache", ["ear pain", "earache", "ear discharge", "kaan me dard", "कान में दर्द", "कान बहना"]),
+            ("toothache", ["toothache", "tooth pain", "dental", "gum swelling", "daant me dard", "दांत में दर्द", "मसूड़ों में सूजन"]),
+            ("burn / wound", ["burn", "scald", "cut", "wound", "bleeding wound", "jal gaya", "chot", "घाव", "जल गया"]),
+            ("palpitations", ["palpitations", "racing heart", "heart pounding", "heart fluttering", "dil ki dhadkan", "घबराहट", "दिल की धड़कन"]),
             ("neck stiffness", ["stiff neck", "neck stiffness", "cannot bend neck", "गर्दन में अकड़न", "गर्दन अकड़", "gardan akad", "gardan me dard"]),
             ("facial drooping", ["facial drooping", "face droop", "slurred speech", "weakness on one side", "चेहरा टेढ़ा", "बोलने में परेशानी", "लकवा"]),
             ("runny nose", ["runny nose", "sneezing", "congestion", "tickle in throat", "छींक", "नाक बहना", "chheenk"]),
@@ -317,11 +327,11 @@ class MedGemmaService:
                                 break
                     break
 
-        # Dynamic Clinical Urgency Signals (Model Thinking)
+        # Dynamic Clinical Urgency Signals (Model Thinking across specialties)
         urgency_signals = []
         for pt in patient_texts:
             pt_l = pt.lower()
-            # Emergency: Acute Coronary / Cardiopulmonary / Stroke signs
+            # 1. Emergency: Acute Coronary Syndrome
             if any(term in pt_l for term in ["chest pain", "crushing", "radiat", "सीने में दर्द", "बाएं हाथ", "छाती में दर्द", "dil me"]) and any(r in pt_l for r in ["arm", "jaw", "neck", "बाएं हाथ", "गर्दन", "gardan", "haath"]):
                 urgency_signals.append({
                     "signal": "Acute Coronary Syndrome Red Flag",
@@ -329,13 +339,15 @@ class MedGemmaService:
                     "rationale": "Crushing chest discomfort radiating to left arm/jaw indicates potential acute myocardial infarction.",
                     "source_quote": pt
                 })
-            elif any(term in pt_l for term in ["can't breathe", "cannot breathe", "gasping", "सांस नहीं आ रही", "दम घुट रहा"]):
+            # 2. Emergency: Severe Respiratory Failure
+            elif any(term in pt_l for term in ["can't breathe", "cannot breathe", "gasping", "stridor", "सांस नहीं आ रही", "दम घुट रहा"]):
                 urgency_signals.append({
                     "signal": "Acute Severe Respiratory Compromise",
                     "severity_level": "emergency",
-                    "rationale": "Inability to breathe adequately represents acute airway or ventilatory failure.",
+                    "rationale": "Inability to breathe adequately or stridor represents acute airway or ventilatory failure.",
                     "source_quote": pt
                 })
+            # 3. Emergency: Acute Stroke FAST
             elif any(term in pt_l for term in ["facial droop", "slurred speech", "weakness on one side", "चेहरा टेढ़ा", "लकवा"]):
                 urgency_signals.append({
                     "signal": "Acute Neurological Deficit (FAST)",
@@ -343,7 +355,39 @@ class MedGemmaService:
                     "rationale": "Focal acute neurological symptoms indicate potential cerebrovascular accident / stroke.",
                     "source_quote": pt
                 })
-            # Urgent: Acute Central Chest Discomfort / Anginal Equivalent without radiation
+            # 4. Emergency: Severe Hemorrhage or Hematemesis
+            elif (any(w in pt_l for w in ["vomit", "ulti", "throwing up", "threw up", "blood in vomit", "hematemesis", "उल्टी में खून", "खून की उल्टी", "khoon ki ulti"]) and any(w in pt_l for w in ["blood", "खून", "khoon", "coffee ground", "coffee-ground"])) or any(w in pt_l for w in ["coughing up blood", "hemoptysis", "uncontrolled bleeding"]):
+                urgency_signals.append({
+                    "signal": "Severe Upper GI Hemorrhage / Hematemesis",
+                    "severity_level": "emergency",
+                    "rationale": "Active hematemesis or blood in vomit indicates acute upper gastrointestinal hemorrhage and risk of hemorrhagic shock.",
+                    "source_quote": pt
+                })
+            # 5. Emergency: Anaphylaxis / Upper Airway Compromise
+            elif any(w in pt_l for w in ["swollen tongue", "swollen throat", "throat closing", "lips swelling", "anaphylaxis", "गला बंद", "जीभ सूज", "होंठ सूज"]):
+                urgency_signals.append({
+                    "signal": "Anaphylaxis / Upper Airway Compromise",
+                    "severity_level": "emergency",
+                    "rationale": "Acute orofacial and laryngeal angioedema indicates potentially life-threatening systemic anaphylaxis.",
+                    "source_quote": pt
+                })
+            # 6. Emergency: Acute Ocular Threat / Sudden Vision Loss
+            elif (any(w in pt_l for w in ["vision", "blind", "can't see", "cannot see", "दृष्टि", "दिखाई नहीं"]) and any(w in pt_l for w in ["sudden", "lost", "loss", "अचानक", "गायब"])) or any(w in pt_l for w in ["chemical in eye", "acid in eye", "splash in eye", "आंख में केमिकल"]):
+                urgency_signals.append({
+                    "signal": "Acute Ocular Emergency / Vision Loss",
+                    "severity_level": "emergency",
+                    "rationale": "Sudden loss of visual acuity or chemical exposure presents an immediate threat to sight requiring emergency ophthalmology.",
+                    "source_quote": pt
+                })
+            # 7. Emergency: Cauda Equina Syndrome
+            elif any(w in pt_l for w in ["back pain", "kamar dard", "कमर दर्द", "spine"]) and any(w in pt_l for w in ["numb", "groin", "buttock", "bowel", "bladder", "incontinence", "सुन्न", "नियंत्रण खो"]):
+                urgency_signals.append({
+                    "signal": "Suspected Cauda Equina Syndrome",
+                    "severity_level": "emergency",
+                    "rationale": "Back pain with saddle anesthesia or loss of sphincter control suggests acute spinal cauda equina compression.",
+                    "source_quote": pt
+                })
+            # 8. Urgent: Acute Central Chest Discomfort without confirmed radiation
             elif any(term in pt_l for term in [
                 "chest pain", "pressure in chest", "chest tightness", "tightness in chest", "lower chest is paining",
                 "सीने में दर्द", "छाती में दर्द", "सीना भारी", "chhati me dard", "seene me dard", "chest me pain",
@@ -355,7 +399,7 @@ class MedGemmaService:
                     "rationale": "Acute chest pain, pressure, or tightness warrants urgent clinical physician evaluation and ECG.",
                     "source_quote": pt
                 })
-            # Urgent: Meningeal signs / High Fever + Stiff neck
+            # 9. Urgent: Meningeal Irritation Signs
             elif (any(f in pt_l for f in ["fever", "बुखार", "bukhar", "high temp"]) and any(s in pt_l for s in ["stiff", "neck", "गर्दन में अकड़न", "gardan akad"])) or "stiff neck" in pt_l:
                 urgency_signals.append({
                     "signal": "Possible Meningeal Irritation Signs",
@@ -363,7 +407,39 @@ class MedGemmaService:
                     "rationale": "Febrile presentation accompanied by nuchal rigidity requires urgent clinical assessment to rule out meningitis.",
                     "source_quote": pt
                 })
-            # Urgent: Severe Pain >= 8/10
+            # 10. Urgent: Acute Surgical Abdomen / Peritoneal Irritation
+            elif any(w in pt_l for w in ["abdominal pain", "stomach pain", "belly pain", "पेट में दर्द", "pet dard"]) and any(w in pt_l for w in ["vomit", "throwing up", "intolerant", "can't keep water", "उल्टी", "ulti", "rebound"]):
+                urgency_signals.append({
+                    "signal": "Acute Surgical Abdomen / Peritoneal Irritation",
+                    "severity_level": "urgent",
+                    "rationale": "Severe acute abdominal pain accompanied by persistent vomiting or inability to tolerate oral fluids warrants urgent surgical evaluation.",
+                    "source_quote": pt
+                })
+            # 11. Urgent: Suspected Sepsis / Severe Infection
+            elif (any(w in pt_l for w in ["fever", "बुखार", "bukhar", "high temp"]) and any(w in pt_l for w in ["confusion", "confused", "shivering", "rigor", "chills", "भ्रम", "कंपकंपी", "shiver"])) and not any(s["signal"] == "Possible Meningeal Irritation Signs" for s in urgency_signals):
+                urgency_signals.append({
+                    "signal": "Suspected Sepsis / Severe Systemic Infection",
+                    "severity_level": "urgent",
+                    "rationale": "High fever with severe rigors or altered mental state indicates potential systemic bacteremia or sepsis.",
+                    "source_quote": pt
+                })
+            # 12. Urgent: Suspected Lower GI Bleeding / Melena
+            elif any(w in pt_l for w in ["black tarry stool", "melena", "dark black stool", "blood in stool", "काला मल", "kali latrine", "latrine me khoon"]):
+                urgency_signals.append({
+                    "signal": "Suspected Lower GI Bleeding / Melena",
+                    "severity_level": "urgent",
+                    "rationale": "Melena or lower gastrointestinal hemorrhage warrants urgent physician assessment and hemodynamic monitoring.",
+                    "source_quote": pt
+                })
+            # 13. Urgent: Trauma with Inability to Bear Weight
+            elif any(w in pt_l for w in ["fall", "twisted", "sprain", "injury", "chot", "मोच", "चोट"]) and any(w in pt_l for w in ["cannot walk", "can't walk", "unable to walk", "cant bear weight", "deformity", "broken", "chal nahi", "चल नहीं"]):
+                urgency_signals.append({
+                    "signal": "Acute Musculoskeletal Trauma / Fracture Risk",
+                    "severity_level": "urgent",
+                    "rationale": "Inability to bear weight following acute limb trauma or joint injury warrants urgent radiographic evaluation for fracture.",
+                    "source_quote": pt
+                })
+            # 14. Urgent: Severe Acute Pain Acuity (>= 8/10)
             elif (
                 any(p in pt_l for p in ["8/10", "9/10", "10/10", "8 out of 10", "9 out of 10", "10 out of 10", "असहनीय दर्द", "बहुत तेज दर्द", "bahut tez dard", "bahut shar dard", "bahut sar dard"]) or
                 re.match(r"^\s*([89]|10)\s*(?:/10|out of 10)?\s*$", pt_l) or
@@ -523,17 +599,22 @@ class MedGemmaService:
 
         # Extract previously asked questions
         already_asked = re.findall(r"<previously_asked_question>(.*?)</previously_asked_question>", prompt, re.DOTALL)
-        asked_text = " ".join(already_asked).lower()
 
-        # Language detection
-        is_hindi = bool(re.search(r'[\u0900-\u097F]', full_text) or "preferred language: hindi" in prompt.lower())
-        is_hinglish = bool("preferred language: hinglish" in prompt.lower() or any(w in full_text.split() for w in ["dard", "bukhar", "ulti", "chakkar", "seene", "saans", "gardan", "pet", "nahi"]))
-        lang = "Hindi" if is_hindi else ("Hinglish" if is_hinglish else "English")
+        # Language detection: honor explicit preferred language first
+        p_match = re.search(r"preferred language:\s*([a-zA-Z]+)", prompt, re.IGNORECASE)
+        if p_match and p_match.group(1).capitalize() in ("Hindi", "Hinglish", "English"):
+            lang = p_match.group(1).capitalize()
+        elif re.search(r'[\u0900-\u097F]', full_text):
+            lang = "Hindi"
+        elif any(w in full_text.split() for w in ["dard", "bukhar", "ulti", "chakkar", "seene", "saans", "gardan", "pet", "nahi"]):
+            lang = "Hinglish"
+        else:
+            lang = "English"
 
-        # If 3 or more questions have already been asked, conclude questioning
-        if len(already_asked) >= 3:
+        # If 4 or more questions have already been asked, conclude questioning
+        if len(already_asked) >= 4:
             term_msg = {
-                "Hindi": "पर्याप्त जानकारी एकत्रित की जा चुकी है। डॉक्टर जल्द ही आपकी समीक्षा करेंगे।",
+                "Hindi": "आपकी सभी आवश्यक प्राथमिक जानकारी दर्ज कर ली गई है। डॉक्टर जल्द ही आपकी समीक्षा करेंगे।",
                 "Hinglish": "Aapki primary clinical information record ho gayi hai. Doctor jald review karenge.",
                 "English": "Sufficient clinical information has been gathered across primary dimensions."
             }[lang]
@@ -544,146 +625,14 @@ class MedGemmaService:
                 "is_terminal": True
             })
 
-        # Priority 0: Active Hematemesis / GI Bleeding (if vomiting blood and volume/appearance not asked)
-        if any(w in full_text for w in ["vomit", "ulti", "throwing up", "blood", "खून", "khoon"]) and any(w in full_text for w in ["blood", "खून", "khoon"]) and "bright red" not in asked_text and "coffee" not in asked_text and "लाल" not in asked_text:
-            q_text = {
-                "Hindi": "उल्टी में निकला खून ताजा लाल है या कॉफी के रंग जैसा गहरा काला, और लगभग कितनी मात्रा में निकला है?",
-                "Hinglish": "Ulti me jo khoon nikla wo bright red hai ya coffee grounds jaisa dark, aur lagbhag kitna amount nikla hai?",
-                "English": "Is the blood you vomited bright red or dark like coffee grounds, and roughly how much have you brought up?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Assessing active upper GI hemorrhage volume and appearance (bright red vs coffee grounds).",
-                "target_field": "hematemesis_appearance_and_volume",
-                "is_terminal": False
-            })
+        from backend.services.questioning import AdaptiveQuestioningService
+        q_output = AdaptiveQuestioningService._get_unasked_fallback_question(
+            previous_questions=already_asked,
+            patient_messages=patient_texts,
+            language=lang
+        )
+        return json.dumps(q_output.model_dump())
 
-        # Priority 1: Cardiac Red Flags (if chest pain mentioned and radiation not yet asked)
-        if any(w in full_text for w in ["chest pain", "chest", "seene me dard", "chhati", "dil me", "सीने में दर्द", "छाती में दर्द", "दिल में दर्द"]) and "radiat" not in asked_text and "फैल" not in asked_text and "jaw" not in asked_text:
-            q_text = {
-                "Hindi": "क्या सीने का दर्द आपके बाएं हाथ, कंधे, गर्दन, जबड़े या पीठ की तरफ फैल रहा है?",
-                "Hinglish": "Kya chest pain aapke left arm, shoulder, neck, jaw ya back ki taraf radiate kar raha hai?",
-                "English": "Does the chest pain radiate to your left arm, shoulder, neck, jaw, or back?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Screening for classic acute coronary radiation warning signs.",
-                "target_field": "pain_radiation",
-                "is_terminal": False
-            })
-
-        # Priority 2: Cardiopulmonary Associated Symptoms (if chest/breath mentioned and not yet asked)
-        if any(w in full_text for w in ["chest", "breath", "saans", "सांस", "chhati", "seene"]) and "sweat" not in asked_text and "पसीना" not in asked_text and "lightheaded" not in asked_text:
-            q_text = {
-                "Hindi": "क्या सीने में दर्द के साथ सांस फूलना, ठंडा पसीना, उल्टी या चक्कर आ रहे हैं?",
-                "Hinglish": "Kya chest pain ke sath saans phoolna, cold sweats, ulti ya chakkar aa rahe hain?",
-                "English": "Are you experiencing any shortness of breath, cold sweats, nausea, or lightheadedness along with the chest pain?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Assessing associated symptoms of cardiopulmonary compromise.",
-                "target_field": "associated_cardiac_symptoms",
-                "is_terminal": False
-            })
-
-        # Priority 3: Meningeal / Neurological Signs (if fever or headache mentioned and not yet asked)
-        if any(w in full_text for w in ["fever", "headache", "बुखार", "सिरदर्द", "bukhar", "sir dard", "sar dard", "headahed"]) and "stiff" not in asked_text and "neck" not in asked_text and "अकड़न" not in asked_text and "akad" not in asked_text:
-            q_text = {
-                "Hindi": "क्या आपको गर्दन में अकड़न, तेज रोशनी से परेशानी या अत्यधिक सिरदर्द है?",
-                "Hinglish": "Kya gardan me stiffness, bright light se pareshani, ya extreme headache hai?",
-                "English": "Do you have any neck stiffness, sensitivity to bright light, or confusion?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Screening for meningeal irritation signs in febrile or headache patients.",
-                "target_field": "neck_stiffness_photophobia",
-                "is_terminal": False
-            })
-
-        # Priority 4: Shortness of Breath specific questions
-        if any(w in full_text for w in ["shortness of breath", "trouble breathing", "breathless", "saans lene me", "सांस फूलना"]) and "sentence" not in asked_text and "lying flat" not in asked_text and "लेटने" not in asked_text:
-            q_text = {
-                "Hindi": "क्या आप बिना सांस फूले पूरे वाक्य बोल पा रहे हैं, और क्या सीधे लेटने पर सांस ज्यादा फूलती है?",
-                "Hinglish": "Kya aap bina ruke full sentences बोल pa rahe hain, aur letne par saans zyada phoolti hai?",
-                "English": "Are you able to speak in full sentences without gasping, and does lying flat make your breathing harder?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Assessing functional respiratory reserve and orthopnea.",
-                "target_field": "respiratory_severity_orthopnea",
-                "is_terminal": False
-            })
-
-        # Priority 5: Abdominal pain specific questions
-        if any(w in full_text for w in ["abdominal pain", "stomach pain", "belly pain", "pet dard", "pet me dard", "पेट में दर्द"]) and "fluid" not in asked_text and "water" not in asked_text and "पानी" not in asked_text:
-            q_text = {
-                "Hindi": "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी या तरल चीजें बिना उल्टी किए पचा पा रहे हैं?",
-                "Hinglish": "Pet me dard exactly kahan par hai, aur kya aap water ya liquids bina ulti ke digest kar pa rahe hain?",
-                "English": "Where exactly in your abdomen is the pain located, and are you able to keep water or fluids down without vomiting?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Localizing abdominal pain and assessing oral fluid tolerance.",
-                "target_field": "abdominal_location_fluid_tolerance",
-                "is_terminal": False
-            })
-
-        # Priority 6: Onset & Duration (if not yet asked and not explicitly reported)
-        if "begin" not in asked_text and "when did" not in asked_text and "शुरू" not in asked_text and "kab shuru" not in asked_text:
-            if not any(w in full_text for w in ["yesterday", "day", "hour", "week", "since", "ago", "started", "कल से", "दिन से", "घंटे से", "kal se", "din se"]):
-                q_text = {
-                    "Hindi": "यह लक्षण सबसे पहले कब शुरू हुए और क्या यह समय के साथ बढ़ रहे हैं, घट रहे हैं या लगातार बने हुए हैं?",
-                    "Hinglish": "Ye symptoms sabse pehle kab shuru hue, aur kya ye continuously badh rahe hain ya kam-zyada ho rahe hain?",
-                    "English": "When did your symptoms first begin, and have they been constant, worsening, or coming and going?"
-                }[lang]
-                return json.dumps({
-                    "next_question": q_text,
-                    "reason_for_question": "Onset and duration are essential for triage acuity.",
-                    "target_field": "onset_and_duration",
-                    "is_terminal": False
-                })
-
-        # Priority 7: Severity (if not yet asked and not explicitly reported)
-        if "scale" not in asked_text and "0 to 10" not in asked_text and "severity" not in asked_text and "पैमाने" not in asked_text:
-            if not any(w in full_text for w in ["/10", "out of 10", "mild", "moderate", "severe", "असहनीय", "बहुत तेज", "bahut tez"]):
-                q_text = {
-                    "Hindi": "0 से 10 के पैमाने पर (जहाँ 0 कोई दर्द नहीं और 10 असहनीय दर्द है), अभी आपका दर्द कितना तीव्र है?",
-                    "Hinglish": "0 se 10 ke scale par (jahan 0 koi dard nahi aur 10 unbearable pain hai), abhi dard kitna severe hai?",
-                    "English": "On a scale from 0 to 10 (where 0 is no discomfort and 10 is unbearable), how severe is your symptom right now?"
-                }[lang]
-                return json.dumps({
-                    "next_question": q_text,
-                    "reason_for_question": "Quantifying symptom severity to establish clinical acuity.",
-                    "target_field": "severity",
-                    "is_terminal": False
-                })
-
-        # Priority 8: Medications & Allergies (if not yet asked)
-        if "medicat" not in asked_text and "allerg" not in asked_text and "दवाइयाँ" not in asked_text and "dawai" not in asked_text:
-            q_text = {
-                "Hindi": "क्या आप कोई नियमित दवाइयाँ ले रहे हैं, या आपको कोई पुरानी बीमारी या एलर्जी है?",
-                "Hinglish": "Kya aap koi regular medications le rahe hain, ya aapko koi existing medical conditions ya allergies hain?",
-                "English": "Are you currently taking any prescription medications, or do you have any relevant medical conditions or allergies?"
-            }[lang]
-            return json.dumps({
-                "next_question": q_text,
-                "reason_for_question": "Identifying relevant baseline health status, regular medications, and allergies.",
-                "target_field": "medications_and_history",
-                "is_terminal": False
-            })
-
-        # Otherwise sufficient
-        term_msg = {
-            "Hindi": "पर्याप्त जानकारी एकत्रित की जा चुकी है। डॉक्टर जल्द ही आपकी समीक्षा करेंगे।",
-            "Hinglish": "Aapki primary clinical information record ho gayi hai. Doctor jald review karenge.",
-            "English": "Sufficient clinical information has been gathered across primary dimensions."
-        }[lang]
-        return json.dumps({
-            "next_question": None,
-            "reason_for_question": term_msg,
-            "target_field": "intake_complete",
-            "is_terminal": True
-        })
 
     def _mock_summary_response(self, prompt: str) -> str:
         patient_texts = self._extract_patient_texts(prompt)

@@ -86,6 +86,9 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
         init_reasons = initial_triage.reasons
         init_missing = initial_triage.missing_information
         init_uncertainties = initial_triage.uncertainties
+        init_decision_path = initial_triage.decision_path or "model_urgency_reasoning"
+    else:
+        init_decision_path = "model_urgency_reasoning"
 
     new_case = Case(
         id=case_id,
@@ -96,6 +99,7 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
         priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
         missing_information_json=json.dumps(init_missing) if init_missing else None,
         uncertainties_json=json.dumps(init_uncertainties) if init_uncertainties else None,
+        decision_path=init_decision_path,
         review_status="pending",
         triage_rule_version=settings.TRIAGE_RULE_VERSION,
         created_at=datetime.utcnow(),
@@ -355,6 +359,8 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    if triage_res.decision_path:
+        case.decision_path = triage_res.decision_path
     case.updated_at = datetime.utcnow()
     db.commit()
 
@@ -605,6 +611,8 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
     case.priority_reasons_json = json.dumps(final_reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
+    if triage_res.decision_path:
+        case.decision_path = triage_res.decision_path
     case.review_status = "pending"
     case.updated_at = datetime.utcnow()
 

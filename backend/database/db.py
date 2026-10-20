@@ -69,6 +69,13 @@ def _migrate_sqlite_schema():
                 if "confidence" not in existing_ev_cols:
                     logger.info("Migrating evidence table: adding confidence column")
                     conn.execute(text("ALTER TABLE evidence ADD COLUMN confidence FLOAT"))
+
+            # Check cases table
+            res_cases = conn.execute(text("PRAGMA table_info(cases)")).fetchall()
+            existing_case_cols = {row[1] for row in res_cases}
+            if existing_case_cols and "decision_path" not in existing_case_cols:
+                logger.info("Migrating cases table: adding decision_path column")
+                conn.execute(text("ALTER TABLE cases ADD COLUMN decision_path VARCHAR(64) DEFAULT 'model_urgency_reasoning'"))
     except Exception as e:
         logger.warning(f"Notice during SQLite schema check/migration: {e}")
 

@@ -95,6 +95,10 @@ class TriageResult(BaseModel):
     missing_information: List[str]
     uncertainties: List[str]
     triage_rule_version: str
+    decision_path: Optional[str] = Field(
+        "model_clinical_reasoning",
+        description="Evaluation pathway: model_urgency_reasoning, multidimensional_acuity_synthesis, or protocol_safety_guardrail"
+    )
 
 
 # -------------------------------------------------------------

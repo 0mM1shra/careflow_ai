@@ -28,6 +28,7 @@ class Case(Base):
     missing_information_json = Column(Text, default="[]", nullable=False)
     uncertainties_json = Column(Text, default="[]", nullable=False)
     triage_rule_version = Column(String(32), default="v1.0.0-prototype", nullable=False)
+    decision_path = Column(String(64), default="model_urgency_reasoning", nullable=True)
     
     # Reviewer workflow: 'pending', 'reviewed', 'approved', 'reopened'
     review_status = Column(String(32), default="pending", nullable=False, index=True)
@@ -56,6 +57,7 @@ class Case(Base):
             "missing_information": json.loads(self.missing_information_json or "[]"),
             "uncertainties": json.loads(self.uncertainties_json or "[]"),
             "triage_rule_version": self.triage_rule_version,
+            "decision_path": getattr(self, "decision_path", None) or "model_urgency_reasoning",
             "review_status": self.review_status,
             "reviewer_summary": self.reviewer_summary,
             "reviewer_priority": self.reviewer_priority,

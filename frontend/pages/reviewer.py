@@ -129,6 +129,18 @@ def render_priority_badge(priority: str) -> str:
     else:
         return '<span class="badge-err">⚠️ Review Required — AI Unavailable</span>'
 
+def render_decision_path_badge(path: str) -> str:
+    path_low = (path or "").lower()
+    if "model" in path_low:
+        return '<span style="background-color: #EDE9FE; color: #5B21B6; border: 1px solid #A78BFA; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">🤖 MedGemma Urgency Reasoning</span>'
+    elif "acuity" in path_low:
+        return '<span style="background-color: #E0F2FE; color: #075985; border: 1px solid #7DD3FC; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">📊 Multi-Dimensional Acuity</span>'
+    elif "guardrail" in path_low:
+        return '<span style="background-color: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">🛡️ Safety Guardrail Floor</span>'
+    else:
+        return '<span style="background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">⚠️ AI Failsafe Fallback</span>'
+
+
 # Header
 st.markdown("""
 <div class="reviewer-header">
@@ -271,9 +283,12 @@ with col_detail:
             ai_st = case_data.get("ai_status", "pending")
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
 
+            decision_path = case_data.get("decision_path") or "model_urgency_reasoning"
+
             st.markdown(f"""
-            <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 16px;">
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;">
                 {render_priority_badge(c_prio)}
+                {render_decision_path_badge(decision_path)}
                 <span style="font-size: 13px; color: #475569;">
                     Protocol: <code>{rule_ver}</code> | AI Engine: <code>MedGemma ({ai_st})</code>
                 </span>
