@@ -203,6 +203,57 @@ def get_case(case_id: str, db: Session = Depends(get_db)):
     return case_dict
 
 
+@router.delete("/cases/{case_id}")
+def delete_case(case_id: str, db: Session = Depends(get_db)):
+    """
+    Permanently deletes a patient case and all associated messages,
+    evidence records, and audit events from the system.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    case_id_val = case.id
+    db.delete(case)
+    db.commit()
+    logger.info(f"Permanently deleted case {case_id_val} and associated cascade records.")
+    return {"status": "deleted", "case_id": case_id_val}
+
+
+@router.post("/cases/{case_id}/mark-done")
+def mark_case_done(case_id: str, notes: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Marks a patient case as done/completed in the queue.
+    Records an immutable audit event and updates review_status to 'done'.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    old_status = case.review_status
+    case.review_status = "done"
+    case.reviewed_at = datetime.utcnow()
+    if notes:
+        case.reviewer_notes = notes
+    case.updated_at = datetime.utcnow()
+
+    audit = AuditEvent(
+        case_id=case.id,
+        event_type="case_marked_done",
+        old_value_json=json.dumps({"review_status": old_status}),
+        new_value_json=json.dumps({"review_status": "done"}),
+        reason=notes or "Clinician marked patient case as completed/done in queue",
+        actor_role="reviewer",
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(case)
+
+    return {"status": "success", "case_id": case.id, "review_status": "done"}
+
+
+
 # -------------------------------------------------------------
 # Multilingual Audio Transcription & Document OCR Preview
 # -------------------------------------------------------------

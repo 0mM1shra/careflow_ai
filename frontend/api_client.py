@@ -134,15 +134,29 @@ class CareFlowAPIClient:
         self,
         case_id: str,
         new_priority: str,
-        reason: str,
+        reason: Optional[str] = None,
         reviewer_name: str = "Reviewer"
     ) -> Dict[str, Any]:
+        default_reason = f"Clinician adjusted operational priority to {new_priority} based on clinical review."
         payload = {
             "new_priority": new_priority,
-            "reason": reason,
-            "reviewer_name": reviewer_name
+            "reason": (reason.strip() if reason and len(reason.strip()) >= 5 else default_reason),
+            "reviewer_name": reviewer_name or "Reviewer"
         }
         resp = requests.post(f"{self.base_url}/cases/{case_id}/override-priority", json=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def mark_case_done(self, case_id: str, notes: Optional[str] = None) -> Dict[str, Any]:
+        params = {}
+        if notes:
+            params["notes"] = notes
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/mark-done", params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_case(self, case_id: str) -> Dict[str, Any]:
+        resp = requests.delete(f"{self.base_url}/cases/{case_id}", timeout=15)
         resp.raise_for_status()
         return resp.json()
 
@@ -158,3 +172,4 @@ class CareFlowAPIClient:
         return resp.json()
 
 api_client = CareFlowAPIClient()
+
