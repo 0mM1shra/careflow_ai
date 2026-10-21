@@ -204,8 +204,8 @@ class MedGemmaService:
             except Exception as e:
                 logger.warning(f"Hosted fine-tuned MedGemma call failed ({e}); falling back to clinical emulator.")
 
-        # 2. Local / PEFT Mode: Attempt local pipeline call if available
-        if self.mode in ("local", "peft") and self._local_pipeline is not None:
+        # 2. Local / PEFT Mode: Attempt local pipeline call
+        if self.mode in ("local", "peft"):
             try:
                 full_prompt = (
                     f"<start_of_turn>system\n{system_prompt}\n<end_of_turn>\n"
@@ -410,19 +410,38 @@ class MedGemmaService:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 1024,
-                "temperature": 0.1,  # Low temperature for deterministic clinical extraction
-                "top_p": 0.95,
-                "return_full_text": False
+        is_openai_style = "chat/completions" in self.endpoint or "v1" in self.endpoint
+        if is_openai_style:
+            payload = {
+                "model": self.model_id or "google/medgemma-1.5-4b-it",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 1024,
             }
-        }
+        else:
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 1024,
+                    "temperature": 0.1,
+                    "top_p": 0.95,
+                    "return_full_text": False
+                }
+            }
 
         timeout = settings.MODEL_TIMEOUT_SECONDS
         try:
             resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
+            # If 400 or 422, try alternate schema payload (HF vs OpenAI format)
+            if resp.status_code in (400, 422) and not is_openai_style:
+                alt_payload = {
+                    "model": self.model_id or "google/medgemma-1.5-4b-it",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 1024,
+                }
+                resp = requests.post(self.endpoint, headers=headers, json=alt_payload, timeout=timeout)
+
             if resp.status_code == 401:
                 raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN.")
             elif resp.status_code == 403:
@@ -436,7 +455,6 @@ class MedGemmaService:
             elif resp.status_code == 504:
                 raise ModelInferenceError(f"Hosted endpoint gateway timeout (HTTP 504) after {timeout}s.")
             elif resp.status_code != 200:
-                # Sanitize error text to prevent token leakage
                 safe_err = resp.text.replace(self.api_key, "***") if self.api_key else resp.text
                 raise ModelInferenceError(f"Hosted inference endpoint returned HTTP {resp.status_code}: {safe_err[:200]}")
             
@@ -445,9 +463,15 @@ class MedGemmaService:
                 return data[0]["generated_text"]
             elif isinstance(data, dict) and "generated_text" in data:
                 return data["generated_text"]
-            elif isinstance(data, dict) and "choices" in data:  # OpenAI-compatible TGI / vLLM endpoint
-                return data["choices"][0]["message"]["content"]
+            elif isinstance(data, dict) and "choices" in data and len(data["choices"]) > 0:
+                choice = data["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    return choice["message"]["content"]
+                elif "text" in choice:
+                    return choice["text"]
+                return json.dumps(choice)
             else:
+                return json.dumps(data)
                 return json.dumps(data)
         except requests.Timeout:
             raise ModelInferenceError(f"Hosted MedGemma endpoint timed out after {timeout} seconds.")
@@ -458,7 +482,7 @@ class MedGemmaService:
             raise ModelInferenceError(f"Network error calling MedGemma endpoint: {err_str}")
 
     def _local_inference(self, prompt: str) -> str:
-        """Loads and executes the model locally using Hugging Face Transformers."""
+        """Loads and executes the model locally using Hugging Face Transformers & PEFT LoRA."""
         try:
             import torch
             from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
@@ -471,45 +495,89 @@ class MedGemmaService:
         cache_dir = settings.HF_HOME if settings.HF_HOME else None
 
         if self._local_pipeline is None:
-            logger.info(f"Loading local MedGemma weights for {self.model_id} (cache_dir={cache_dir})...")
+            # 1. Load tokenizer (prefer the local adapter directory)
+            tok_source = str(self.adapter_path) if (self.has_adapter and (self.adapter_path / "tokenizer.json").exists()) else self.model_id
+            logger.info(f"Loading tokenizer from {tok_source} (cache_dir={cache_dir})...")
             try:
                 tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_id,
+                    tok_source,
+                    token=self.api_key or None,
+                    cache_dir=cache_dir
+                )
+            except Exception as tok_err:
+                logger.warning(f"Failed to load tokenizer from {tok_source}: {tok_err}. Falling back to base model.")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.base_model_id,
                     token=self.api_key or None,
                     cache_dir=cache_dir
                 )
 
-                load_kwargs = {"device_map": "auto"}
-                if cache_dir:
-                    load_kwargs["cache_dir"] = cache_dir
+            # 2. Configure model device & quantization
+            load_kwargs = {}
+            if torch.cuda.is_available():
+                load_kwargs["device_map"] = "auto"
+                load_kwargs["torch_dtype"] = torch.float16
+            else:
+                load_kwargs["device_map"] = "cpu"
 
-                if self.local_quantization == "4bit":
-                    try:
-                        from transformers import BitsAndBytesConfig
-                        load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.float16
-                        )
-                    except Exception as e:
-                        logger.warning(f"4-bit quantization setup failed, falling back to default precision: {e}")
+            if cache_dir:
+                load_kwargs["cache_dir"] = cache_dir
 
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_id,
+            if self.local_quantization == "4bit" and torch.cuda.is_available():
+                try:
+                    from transformers import BitsAndBytesConfig
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16
+                    )
+                except Exception as bnb_err:
+                    logger.warning(f"4-bit quantization setup failed, falling back to default precision: {bnb_err}")
+
+            # 3. Load base model
+            model_target = self.base_model_id if self.has_adapter else self.model_id
+            logger.info(f"Loading local base model '{model_target}' on {'CUDA GPU' if torch.cuda.is_available() else 'CPU'}...")
+            base_model = None
+            try:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    model_target,
                     token=self.api_key or None,
                     **load_kwargs
                 )
-                self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
             except Exception as load_err:
-                err_msg = str(load_err)
-                if self.api_key:
-                    err_msg = err_msg.replace(self.api_key, "***")
-                if "gated" in err_msg.lower() or "403" in err_msg or "unauthorized" in err_msg.lower():
-                    raise ModelInferenceError(
-                        f"Gated model access error for '{self.model_id}'. "
-                        f"Please visit https://huggingface.co/{self.model_id} to accept the license agreement "
-                        f"and ensure your HF_TOKEN is configured in .env."
+                # Gemma-3 multimodal architecture fallback
+                try:
+                    from transformers import Gemma3ForConditionalGeneration
+                    logger.info(f"Retrying base model load with Gemma3ForConditionalGeneration...")
+                    base_model = Gemma3ForConditionalGeneration.from_pretrained(
+                        model_target,
+                        token=self.api_key or None,
+                        **load_kwargs
                     )
-                raise ModelInferenceError(f"Failed to load local MedGemma model: {err_msg}")
+                except Exception:
+                    err_msg = str(load_err)
+                    if self.api_key:
+                        err_msg = err_msg.replace(self.api_key, "***")
+                    if "gated" in err_msg.lower() or "403" in err_msg or "unauthorized" in err_msg.lower():
+                        raise ModelInferenceError(
+                            f"Gated model access error for '{model_target}'. "
+                            f"Please visit https://huggingface.co/{model_target} to accept the license agreement "
+                            f"and ensure your HF_TOKEN is configured in .env."
+                        )
+                    raise ModelInferenceError(f"Failed to load local MedGemma base model: {err_msg}")
+
+            # 4. Attach fine-tuned PEFT LoRA adapter
+            if self.has_adapter:
+                try:
+                    from peft import PeftModel
+                    logger.info(f"Attaching fine-tuned LoRA adapter from {self.adapter_path}...")
+                    model = PeftModel.from_pretrained(base_model, str(self.adapter_path))
+                except Exception as peft_err:
+                    logger.warning(f"Failed to attach PEFT adapter: {peft_err}; using base model.")
+                    model = base_model
+            else:
+                model = base_model
+
+            self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
         outputs = self._local_pipeline(
             prompt,
