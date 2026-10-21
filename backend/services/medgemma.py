@@ -36,21 +36,22 @@ class MedGemmaService:
 
     def get_status(self) -> Dict[str, Any]:
         """Returns the readiness status of the model service."""
+        current_mode = settings.MEDGEMMA_MODE.lower()
+        has_token = bool(self.api_key or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN"))
         return {
-            "mode": self.mode,
+            "mode": current_mode,
             "model_id": self.model_id,
             "has_endpoint": bool(self.endpoint),
-            "has_api_key": bool(self.api_key),
-            "masked_key": settings.get_masked_key(self.api_key),
+            "has_api_key": has_token,
+            "masked_key": settings.get_masked_key(self.api_key or os.getenv("HF_TOKEN", "")),
             "timeout_seconds": settings.MODEL_TIMEOUT_SECONDS,
             "asr_model_size": settings.ASR_MODEL_SIZE,
             "ocr_engine": settings.OCR_ENGINE,
             "hf_home": settings.HF_HOME or "default",
-            "is_ready": True if self.mode == "mock" else bool(self.endpoint or self.mode == "local"),
+            "is_ready": True if current_mode == "mock" else bool(self.endpoint or has_token or current_mode == "local"),
             "memory_guidance": (
                 "Google MedGemma 4B requires ~8 GB RAM in fp16, or ~3.5-4 GB in 4-bit quantization. "
-                "On a 16 GB laptop with an RTX 4050 (6 GB VRAM), 4-bit quantization fits comfortably in VRAM (~3.8 GB). "
-                "For instantaneous hackathon testing and automated evaluation, use 'mock' mode."
+                "In 'hosted' mode, inference runs remotely via your configured Hugging Face or vLLM endpoint."
             )
         }
 
@@ -117,39 +118,54 @@ class MedGemmaService:
 
     def _call_model(self, full_prompt: str) -> str:
         """Dispatches prompt according to configured execution mode."""
-        if self.mode == "mock":
+        mode = settings.MEDGEMMA_MODE.lower()
+        if mode == "mock":
             return self._mock_inference(full_prompt)
-        elif self.mode == "hosted":
+        elif mode == "hosted":
             return self._hosted_inference(full_prompt)
-        elif self.mode == "local":
+        elif mode == "local":
             return self._local_inference(full_prompt)
         else:
-            raise ModelInferenceError(f"Unsupported MEDGEMMA_MODE: '{self.mode}'. Use 'mock', 'hosted', or 'local'.")
+            raise ModelInferenceError(f"Unsupported MEDGEMMA_MODE: '{mode}'. Use 'mock', 'hosted', or 'local'.")
 
     def _hosted_inference(self, prompt: str) -> str:
         """Calls a user-configured Hugging Face or TGI/vLLM inference endpoint."""
-        if not self.endpoint:
-            raise ModelInferenceError("MEDGEMMA_ENDPOINT is not configured for 'hosted' mode.")
+        target_endpoint = self.endpoint.strip() if self.endpoint else f"https://router.huggingface.co/hf-inference/models/{self.model_id}"
+        api_token = self.api_key or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("OPENAI_API_KEY", "")
+
+        if "huggingface.co" in target_endpoint and not api_token:
+            raise ModelInferenceError(
+                "Hosted Hugging Face endpoint requires an API token. "
+                "Please add MEDGEMMA_API_KEY=hf_... or HF_TOKEN=hf_... to your .env file."
+            )
 
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token.strip()}"
 
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 1024,
-                "temperature": 0.1,  # Low temperature for deterministic clinical extraction
-                "top_p": 0.95,
-                "return_full_text": False
+        if "/chat/completions" in target_endpoint:
+            payload = {
+                "model": self.model_id,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 1024
             }
-        }
+        else:
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 1024,
+                    "temperature": 0.1,  # Low temperature for deterministic clinical extraction
+                    "top_p": 0.95,
+                    "return_full_text": False
+                }
+            }
 
         timeout = settings.MODEL_TIMEOUT_SECONDS
         try:
-            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(target_endpoint, headers=headers, json=payload, timeout=timeout)
             if resp.status_code == 401:
-                raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN.")
+                raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN in .env.")
             elif resp.status_code == 403:
                 raise ModelInferenceError(
                     f"Access forbidden (HTTP 403) for model '{self.model_id}'. "
@@ -157,12 +173,12 @@ class MedGemmaService:
                     f"and your token has 'read' permissions."
                 )
             elif resp.status_code == 404:
-                raise ModelInferenceError(f"Hosted endpoint not found (HTTP 404). Check MEDGEMMA_ENDPOINT URL.")
+                raise ModelInferenceError(f"Hosted endpoint not found (HTTP 404) at '{target_endpoint}'. Check MEDGEMMA_ENDPOINT URL.")
             elif resp.status_code == 504:
                 raise ModelInferenceError(f"Hosted endpoint gateway timeout (HTTP 504) after {timeout}s.")
             elif resp.status_code != 200:
                 # Sanitize error text to prevent token leakage
-                safe_err = resp.text.replace(self.api_key, "***") if self.api_key else resp.text
+                safe_err = resp.text.replace(api_token, "***") if api_token else resp.text
                 raise ModelInferenceError(f"Hosted inference endpoint returned HTTP {resp.status_code}: {safe_err[:200]}")
             
             data = resp.json()
@@ -178,8 +194,8 @@ class MedGemmaService:
             raise ModelInferenceError(f"Hosted MedGemma endpoint timed out after {timeout} seconds.")
         except requests.RequestException as e:
             err_str = str(e)
-            if self.api_key:
-                err_str = err_str.replace(self.api_key, "***")
+            if api_token:
+                err_str = err_str.replace(api_token, "***")
             raise ModelInferenceError(f"Network error calling MedGemma endpoint: {err_str}")
 
     def _local_inference(self, prompt: str) -> str:
