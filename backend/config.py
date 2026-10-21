@@ -9,11 +9,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 class Settings:
-    # Model execution mode: 'mock', 'hosted', or 'local'
+    # Model execution mode: 'mock', 'hosted', or 'local' (or 'peft')
     MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "mock").lower()
     
-    # Model Identifier
+    # Model Identifier & Fine-Tuned LoRA Adapter
     MEDGEMMA_MODEL_ID: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
+    MEDGEMMA_BASE_MODEL_ID: str = os.getenv("MEDGEMMA_BASE_MODEL_ID", "unsloth/medgemma-4b-it-unsloth-bnb-4bit")
+    MEDGEMMA_ADAPTER_PATH: str = os.getenv("MEDGEMMA_ADAPTER_PATH", str(BASE_DIR / "careflow-medgemma-final"))
     
     # Hosted Endpoint & API Key (supports MEDGEMMA_API_KEY or standard HF_TOKEN)
     MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "")

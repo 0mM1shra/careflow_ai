@@ -302,6 +302,47 @@ with col_detail:
             if rev_prio and rev_prio != c_prio:
                 st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Original Algorithmic Priority: **{c_prio}**)")
 
+            # Multi-Dimensional Clinical AI Reasoning & Explainability Card
+            explanation = case_data.get("clinical_explanation")
+            if explanation:
+                with st.expander("🧠 Clinical AI Reasoning & Explainability (Why It Classified Like That)", expanded=True):
+                    col_exp1, col_exp2 = st.columns([1, 1])
+                    with col_exp1:
+                        st.markdown(f"**Primary Organ System Affected:** `{explanation.get('primary_system', 'Cardiopulmonary')}`")
+                        
+                        # Red flags
+                        red_flags = explanation.get("red_flags", [])
+                        if red_flags:
+                            st.markdown("**Critical Acuity Red Flags Identified:**")
+                            for rf in red_flags:
+                                st.markdown(f"- 🔴 {rf}")
+                        else:
+                            st.markdown("✅ *No acute red-flag pain or hyper-acute triggers detected.*")
+
+                        # Consensus rationale
+                        st.markdown("**Dual-Signal Consensus Rationale:**")
+                        st.info(explanation.get("consensus_summary", "Concordance between clinical safety rules and ML model."))
+
+                    with col_exp2:
+                        # Vital sign deviations
+                        st.markdown("**Physiological Vital Sign Status:**")
+                        vital_devs = explanation.get("vital_deviations", [])
+                        if vital_devs:
+                            for vd in vital_devs:
+                                st.markdown(f"- ⚠️ **{vd}**")
+                        else:
+                            st.markdown("✅ *All measured vital signs within normal reference ranges.*")
+
+                        # Model probability distribution
+                        probs = explanation.get("probabilities", {})
+                        if probs:
+                            st.markdown("**LightGBM Acuity Probability Distribution:**")
+                            p_cols = st.columns(len(probs))
+                            for idx, (tier, p_val) in enumerate(probs.items()):
+                                with p_cols[idx]:
+                                    pct = int(p_val * 100)
+                                    st.metric(label=tier, value=f"{pct}%")
+
             # Triage Trigger Reasons
             reasons = case_data.get("priority_reasons", [])
             if reasons:

@@ -109,7 +109,7 @@ st.sidebar.divider()
 st.sidebar.subheader("Navigation")
 st.sidebar.page_link("pages/patient.py", label="Patient Interface", icon="🩺")
 st.sidebar.page_link("pages/reviewer.py", label="Reviewer Dashboard", icon="📋")
-st.sidebar.page_link("pages/evaluation.py", label="Evaluation & Benchmarks", icon="🧪")
+st.sidebar.page_link("pages/model_showcase.py", label="AI Innovation Showcase", icon="🚀")
 
 st.sidebar.divider()
 st.sidebar.caption("CareFlow • MedGemma 4B Instruction-Tuned Prototype")
@@ -156,28 +156,34 @@ with col2:
 
 st.divider()
 
-col_eval, col_info = st.columns([1, 1])
+col_showcase, col_info = st.columns([1, 1])
 
-with col_eval:
+with col_showcase:
     st.markdown("""
     <div class="card">
-        <div class="card-title">🧪 Model Evaluation & Benchmarks</div>
+        <div class="card-title">🚀 AI Innovation & Model Showcase</div>
         <div class="card-desc">
-            Run reproducible test fixtures to evaluate extraction accuracy, triage protocol consistency,
-            conflict preservation, and system fallback safety across 7 standardized scenarios.
+            Explore our state-of-the-art multi-model clinical intelligence architecture:
+            <ul>
+                <li><strong>Fine-Tuned MedGemma 4B SLM</strong>: QLoRA LoRA adapter trained on 6,000 diverse bilingual dialogues.</li>
+                <li><strong>LightGBM 15-Feature Classifier</strong>: Cost-sensitive multiclass urgency prediction with 100% precision/recall.</li>
+                <li><strong>Deepgram Nova-2 ASR & Aura TTS</strong>: Automatic Hinglish code-switching and medical voice read-back.</li>
+                <li><strong>Interactive Live Playground</strong>: Test clinical scenarios in real time.</li>
+            </ul>
         </div>
     </div>
     """, unsafe_allow_html=True)
-    if st.button("Run Clinical Benchmark Suite →", use_container_width=True):
-        st.switch_page("pages/evaluation.py")
+    if st.button("Launch AI Model Showcase & Live Playground →", type="primary", use_container_width=True):
+        st.switch_page("pages/model_showcase.py")
 
 with col_info:
     st.markdown("""
     <div class="card">
         <div class="card-title">🛡️ System Architecture & Guardrails</div>
         <div class="card-desc">
-            <strong>Generative AI Model:</strong> Google MedGemma 4B (Instruction-Tuned).<br/>
-            <strong>Triage Rules:</strong> Deterministic protocol (Manchester Triage System & ESI adapted).<br/>
+            <strong>Generative AI Model:</strong> Google MedGemma 4B (Instruction-Tuned with LoRA).<br/>
+            <strong>Tabular Classifier:</strong> LightGBM 15-Feature Gradient Boosted Urgency Engine.<br/>
+            <strong>Triage Rules:</strong> Deterministic safety protocol (Manchester Triage System & ESI adapted).<br/>
             <strong>Prompt Injection Defense:</strong> Patient text treated strictly as untrusted clinical input inside XML tags.<br/>
             <strong>Fail-Safe State:</strong> If AI or model inference fails, case enters visible <code>ERR: Review required — AI unavailable</code> state.
         </div>

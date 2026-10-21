@@ -221,46 +221,46 @@ class AdaptiveQuestioningService:
         full_patient_text = " ".join(patient_messages)
         lang = cls._detect_language(preferred_language, full_patient_text)
 
-        # Build prompt with safe utterance enclosure
-        user_content_blocks = [
-            f"<patient_utterance>{msg.strip()}</patient_utterance>"
-            for msg in patient_messages if msg.strip()
-        ]
-        
-        # Include previously asked questions
-        prev_q_blocks = [
-            f"<previously_asked_question>{q.strip()}</previously_asked_question>"
-            for q in assistant_messages if q.strip()
-        ]
+        # Extract vitals if present in evidence_state
+        vitals = {}
+        if evidence_state:
+            vitals = evidence_state.get("vitals", {})
 
-        user_prompt = (
-            f"The patient has provided the following messages (turn count: {current_question_count}/{settings.MAX_FOLLOWUP_QUESTIONS}, preferred language: {lang}):\n\n"
-            + "\n".join(user_content_blocks)
-            + "\n\n"
-            + (("PREVIOUSLY ASKED QUESTIONS (DO NOT REPEAT ANY OF THESE):\n" + "\n".join(prev_q_blocks) + "\n\n") if prev_q_blocks else "")
-            + "Formulate the single most clinically relevant follow-up question to clarify an unaddressed critical dimension. "
-            + "If all key areas have been covered, set 'next_question': null and 'is_terminal': true."
-        )
-
+        # Always run fine-tuned MedGemma SLM to extract features for ML classifier
+        slm_turn = {}
         try:
-            raw_json = medgemma_service.generate_json(
-                system_prompt=QUESTION_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                max_retries=1
+            slm_turn = medgemma_service.generate_slm_triage_turn(
+                conversation_history=patient_messages,
+                vitals=vitals,
+                preferred_language=lang
             )
-            result = FollowUpQuestionOutput.model_validate(raw_json)
+        except Exception as slm_err:
+            logger.warning(f"Fine-tuned SLM questioning extraction encountered: {slm_err}")
 
-            # Deduplication Verification: Check if generated question repeats any previous question
-            if result.next_question and cls._is_duplicate_question(result.next_question, assistant_messages):
-                logger.warning(f"Detected duplicate question '{result.next_question}'. Finding unaddressed alternative.")
-                result = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
+        # Step 1: Check symptom-specific questions first (high-acuity red flags: hematemesis, radiation, etc.)
+        cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
+        if cat_q and not cat_q.is_terminal:
+            cat_q.slm_extraction = slm_turn
+            return cat_q
 
-            return result
+        # Step 2: If catalog questions have been addressed, use fine-tuned SLM bilingual question
+        if slm_turn:
+            if lang.lower() == "hindi":
+                q_text = slm_turn.get("next_question_hi")
+            else:
+                q_text = slm_turn.get("next_question_en") or slm_turn.get("next_question_hi")
 
-        except Exception as e:
-            logger.error(f"Failed to generate follow-up question via model: {e}")
-            # Fallback gracefully to structured symptom/dimension catalog
-            return cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
+            if q_text and not cls._is_duplicate_question(q_text, assistant_messages):
+                return FollowUpQuestionOutput(
+                    next_question=q_text,
+                    reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
+                    target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
+                    is_terminal=False,
+                    slm_extraction=slm_turn
+                )
+
+        cat_q.slm_extraction = slm_turn
+        return cat_q
 
     @classmethod
     def _is_duplicate_question(cls, question: str, previous_questions: List[str]) -> bool:

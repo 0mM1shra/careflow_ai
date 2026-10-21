@@ -161,7 +161,7 @@ def get_lgbm_model() -> Any:
 
 
 def extract_vitals_from_dict_or_text(
-    vitals_dict: Optional[Dict[str, Any]] = None,
+    vitals_dict: Optional[Union[Dict[str, Any], str]] = None,
     text_content: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -170,7 +170,20 @@ def extract_vitals_from_dict_or_text(
     """
     vitals = dict(DEFAULT_VITALS)
 
-    if vitals_dict:
+    # If vitals_dict was passed as string, treat as text_content or parse JSON
+    if isinstance(vitals_dict, str):
+        try:
+            parsed = json.loads(vitals_dict)
+            if isinstance(parsed, dict):
+                vitals_dict = parsed
+            else:
+                text_content = (text_content or "") + " " + vitals_dict
+                vitals_dict = None
+        except Exception:
+            text_content = (text_content or "") + " " + vitals_dict
+            vitals_dict = None
+
+    if isinstance(vitals_dict, dict):
         # Age
         if "age" in vitals_dict and vitals_dict["age"] is not None:
             try:
@@ -223,22 +236,22 @@ def extract_vitals_from_dict_or_text(
 
     # If text is provided, extract missing vitals using regex
     if text_content:
-        # HR regex (e.g. "HR 109 bpm" or "pulse 95")
-        hr_match = re.search(r"\b(?:HR|pulse|heart rate)\s*[:=]?\s*(\d{2,3})\s*(?:bpm)?\b", text_content, re.IGNORECASE)
+        # HR regex (e.g. "HR 109 bpm", "Heart Rate: 128 bpm", "pulse 95")
+        hr_match = re.search(r"\b(?:HR|pulse|heart\s*rate)\s*[:=]?\s*(\d{2,3})\s*(?:bpm)?\b", text_content, re.IGNORECASE)
         if hr_match and vitals["heart_rate"] == DEFAULT_VITALS["heart_rate"]:
             vitals["heart_rate"] = int(hr_match.group(1))
 
-        # BP regex (e.g. "BP 104/70 mmHg" or "BP 120")
-        bp_match = re.search(r"\b(?:BP|blood pressure)\s*[:=]?\s*(\d{2,3})(?:/\d{2,3})?\s*(?:mmHg)?\b", text_content, re.IGNORECASE)
+        # BP regex (e.g. "BP 104/70 mmHg", "Systolic BP: 165 mmHg", "blood pressure 120")
+        bp_match = re.search(r"\b(?:systolic\s*bp|systolic|bp|blood\s*pressure)\s*[:=]?\s*(\d{2,3})(?:/\d{2,3})?\s*(?:mmHg)?\b", text_content, re.IGNORECASE)
         if bp_match and vitals["systolic_bp"] == DEFAULT_VITALS["systolic_bp"]:
             vitals["systolic_bp"] = int(bp_match.group(1))
 
-        # SpO2 regex (e.g. "SpO2 92%" or "oxygen 94%")
-        spo2_match = re.search(r"\b(?:SpO2|O2 sat|oxygen)\s*[:=]?\s*(\d{2,3})\s*%?\b", text_content, re.IGNORECASE)
+        # SpO2 regex (e.g. "SpO2 92%", "SpO2: 91%", "oxygen 94%")
+        spo2_match = re.search(r"\b(?:SpO2|O2\s*sat|oxygen)\s*[:=]?\s*(\d{2,3})\s*%?\b", text_content, re.IGNORECASE)
         if spo2_match and vitals["spo2_pct"] == DEFAULT_VITALS["spo2_pct"]:
             vitals["spo2_pct"] = int(spo2_match.group(1))
 
-        # Temp regex (e.g. "Temp 97.0 F" or "temperature: 101.8 F")
+        # Temp regex (e.g. "Temp 97.0 F", "Temp: 102.4 F", "temperature: 101.8 F")
         temp_match = re.search(r"\b(?:Temp|temperature)\s*[:=]?\s*(\d{2,3}(?:\.\d+)?)\s*(?:F|deg F)?\b", text_content, re.IGNORECASE)
         if temp_match and vitals["temp_f"] == DEFAULT_VITALS["temp_f"]:
             vitals["temp_f"] = float(temp_match.group(1))
@@ -407,6 +420,7 @@ def predict_urgency_lgbm_with_details(
         tier_str = TARGET_PRIORITY_MAP.get(pred_class, "P3")
         return {
             "ml_model_triage": tier_str,
+            "predicted_tier": tier_str,
             "predicted_class": pred_class,
             "probabilities": probabilities,
             "feature_vector": df_features.iloc[0].to_dict(),
@@ -415,8 +429,121 @@ def predict_urgency_lgbm_with_details(
         logger.error(f"Error in predict_urgency_lgbm_with_details: {e}")
         return {
             "ml_model_triage": "P2",
+            "predicted_tier": "P2",
             "predicted_class": 2,
             "probabilities": {},
             "feature_vector": {},
             "error": str(e),
         }
+
+
+def explain_triage_decision(
+    slm_output: Optional[Union[Dict[str, Any], str]] = None,
+    lab_vitals_dict: Optional[Dict[str, Any]] = None,
+    rule_triage: Optional[str] = "P3",
+    ml_triage: Optional[str] = "P3",
+    probabilities: Optional[Dict[str, float]] = None
+) -> Dict[str, Any]:
+    """
+    Generates a multi-dimensional clinical explanation explaining:
+    1. Primary organ system affected.
+    2. Vital sign deviations from normal physiological baselines.
+    3. Red-flag symptoms and acuity markers.
+    4. Model probability breakdown and dual-signal consensus/divergence rationale.
+    """
+    slm_data: Dict[str, Any] = {}
+    if isinstance(slm_output, str):
+        try:
+            slm_data = json.loads(slm_output)
+        except Exception:
+            slm_data = {}
+    elif isinstance(slm_output, dict):
+        slm_data = slm_output
+
+    vitals = extract_vitals_from_dict_or_text(lab_vitals_dict)
+    
+    # Check vital sign deviations
+    vital_deviations = []
+    hr = vitals.get("heart_rate", 88)
+    if hr > 120:
+        vital_deviations.append(f"Severe Tachycardia: Heart Rate {hr} bpm (Normal: 60-100 bpm)")
+    elif hr > 100:
+        vital_deviations.append(f"Tachycardia: Heart Rate {hr} bpm (Normal: 60-100 bpm)")
+    elif hr < 50:
+        vital_deviations.append(f"Critical Bradycardia: Heart Rate {hr} bpm (Normal: 60-100 bpm)")
+
+    bp = vitals.get("systolic_bp", 125)
+    if bp < 90:
+        vital_deviations.append(f"Hypotension / Shock Risk: Systolic BP {bp} mmHg (Normal: 100-130 mmHg)")
+    elif bp > 180:
+        vital_deviations.append(f"Hypertensive Crisis Risk: Systolic BP {bp} mmHg (Normal: 100-130 mmHg)")
+    elif bp > 140:
+        vital_deviations.append(f"Elevated Systolic Blood Pressure: {bp} mmHg")
+
+    spo2 = vitals.get("spo2_pct", 96)
+    if spo2 < 90:
+        vital_deviations.append(f"Severe Hypoxemia: SpO2 {spo2}% (Normal: >= 95%) - High Risk")
+    elif spo2 < 94:
+        vital_deviations.append(f"Borderline Hypoxia: SpO2 {spo2}% (Normal: >= 95%)")
+
+    temp = vitals.get("temp_f", 98.6)
+    if temp >= 101.5:
+        vital_deviations.append(f"High Fever / Hyperthermia: Temp {temp} °F (Normal: 97.5-99.5 °F)")
+    elif temp > 99.8:
+        vital_deviations.append(f"Low-Grade Fever: Temp {temp} °F")
+    elif temp < 96.0:
+        vital_deviations.append(f"Hypothermia: Temp {temp} °F")
+
+    # Primary system identification
+    sys_flag = slm_data.get("primary_system_flag", "sys_systemic")
+    system_display_names = {
+        "sys_cardiopulmonary": "Cardiopulmonary (Heart / Lungs)",
+        "sys_neurological": "Neurological (Brain / Nervous System)",
+        "sys_gastrointestinal": "Gastrointestinal (Digestive System)",
+        "sys_urogenital": "Urogenital (Renal / Urinary)",
+        "sys_musculoskeletal": "Musculoskeletal (Bones / Joints / Spine)",
+        "sys_dermatological": "Dermatological (Skin / Integumentary)",
+        "sys_systemic": "Systemic / Infectious",
+        "sys_eent": "Eye, Ear, Nose, & Throat (EENT)",
+    }
+    primary_sys_name = system_display_names.get(sys_flag, sys_flag.replace("sys_", "").title())
+
+    # Red flag extraction
+    red_flags = []
+    if slm_data.get("red_flag_severe_pain"):
+        red_flags.append("Patient reported severe, intolerable pain intensity")
+    if slm_data.get("red_flag_acute_onset"):
+        red_flags.append("Acute, sudden symptom onset (< 24-48 hours)")
+
+    # Dual-signal consensus analysis
+    r_prio = rule_triage or "P3"
+    m_prio = ml_triage or "P3"
+    
+    if r_prio == m_prio:
+        consensus_text = f"Concordance: Both deterministic protocol rules and statistical LightGBM classifier agree on acuity tier {r_prio}."
+        is_divergent = False
+    else:
+        is_divergent = True
+        if r_prio in ("P0", "P1") and m_prio in ("P2", "P3"):
+            consensus_text = (
+                f"Safety Escalation: Rule-based safety guardrail escalated case to {r_prio} "
+                f"due to clinical red-flag presence, while ML model predicted {m_prio} based on physiological vitals."
+            )
+        else:
+            consensus_text = (
+                f"Divergence: Rule-based triage classified as {r_prio}, while ML model predicted {m_prio}."
+            )
+
+    return {
+        "primary_system": primary_sys_name,
+        "primary_system_flag": sys_flag,
+        "vital_deviations": vital_deviations,
+        "has_abnormal_vitals": len(vital_deviations) > 0,
+        "red_flags": red_flags,
+        "has_red_flags": len(red_flags) > 0,
+        "rule_based_triage": r_prio,
+        "ml_model_triage": m_prio,
+        "consensus_summary": consensus_text,
+        "is_divergent": is_divergent,
+        "probabilities": probabilities or {},
+    }

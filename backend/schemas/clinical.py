@@ -53,6 +53,7 @@ class FollowUpQuestionOutput(BaseModel):
     reason_for_question: str = Field(..., description="Clinical justification for asking this particular question")
     target_field: str = Field(..., description="The clinical field or missing piece of information targeted")
     is_terminal: bool = Field(False, description="Whether questioning should conclude")
+    slm_extraction: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Fine-tuned MedGemma SLM features and bilingual questions")
 
 
 class ClinicalSummaryOutput(BaseModel):
