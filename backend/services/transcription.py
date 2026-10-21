@@ -4,7 +4,7 @@ import math
 import logging
 import tempfile
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 from backend.config import settings
 from backend.schemas.multilingual import TranscriptionResult
@@ -16,7 +16,7 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
 class TranscriptionError(Exception):
-    """Raised when audio transcription fails."""
+    """Raised when audio transcription or TTS fails."""
     pass
 
 
@@ -43,15 +43,17 @@ def _patch_pyav_metadata_errors_compat():
 
 class TranscriptionService:
     """
-    Local Audio Transcription Service supporting faster-whisper.
+    CareFlow Audio Transcription & Speech Service.
     
-    Guarantees:
-    - Configurable ASR model: 'base' or 'tiny'.
-    - Runs on CPU by default to conserve RTX 4050 VRAM for MedGemma.
-    - Temporary files are guaranteed to be cleaned up after inference.
-    - Provides a zero-dependency deterministic mock mode when faster-whisper is not installed
-      or when MEDGEMMA_MODE=mock.
-    - Audio contents are never logged to console or audit logs.
+    Primary Engine (Default):
+    - Deepgram Python SDK: Optimized for Indian accents, Hindi, English, and Hinglish code-switching
+      using Deepgram 'nova-2' with language='en-IN', smart_format=True, punctuate=True, and optional Translation.
+    - Deepgram TTS: Fast clinical voice synthesis (Aura models).
+    
+    Legacy Engines (Preserved under feature flag USE_DEEPGRAM=False or fallback):
+    - Hosted Whisper API (Groq Cloud whisper-large-v3, Hugging Face router).
+    - Local faster-whisper CPU inference.
+    - Deterministic clinical mock mode for zero-dependency testing.
     """
 
     def __init__(self):
@@ -59,8 +61,274 @@ class TranscriptionService:
         _patch_pyav_metadata_errors_compat()
 
     def get_supported_models(self) -> List[str]:
-        return ["base", "tiny"]
+        return ["nova-2", "base", "tiny"]
 
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        """Normalizes UI language strings ('Hindi', 'English', 'Hinglish', 'auto') to ISO codes or None."""
+        if not language:
+            return None
+        cleaned = language.strip().lower()
+        if cleaned in ("", "auto", "detect", "automatic", "none", "null", "hinglish", "mixed"):
+            return None
+        mapping = {
+            "english": "en",
+            "en": "en",
+            "eng": "en",
+            "hindi": "hi",
+            "hi": "hi",
+            "hin": "hi",
+            "en-in": "en-IN",
+            "hi-in": "hi",
+        }
+        return mapping.get(cleaned, None)
+
+    # =========================================================================
+    # PRIMARY ENGINE: Deepgram STT (Speech-to-Text) & Translation
+    # =========================================================================
+    def _deepgram_transcribe(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        language: Optional[str] = None,
+        model_size: Optional[str] = None,
+        translate_to_english: bool = False
+    ) -> Optional[TranscriptionResult]:
+        """
+        Transcribes audio using Deepgram's Python SDK.
+        Configured with model='nova-2' and language='en-IN' for optimal Hinglish & accent accuracy.
+        """
+        api_key = (getattr(settings, "DEEPGRAM_API_KEY", "") or os.getenv("DEEPGRAM_API_KEY") or "").strip()
+        if not api_key:
+            logger.info("DEEPGRAM_API_KEY not set; skipping Deepgram engine.")
+            return None
+
+        norm_lang = self._normalize_language(language)
+        dg_language = norm_lang or getattr(settings, "DEEPGRAM_LANGUAGE", "en-IN") or "en-IN"
+        dg_model = getattr(settings, "DEEPGRAM_MODEL", "nova-2") or "nova-2"
+
+        logger.info(f"Dispatching STT to Deepgram (model={dg_model}, language={dg_language}, translate={translate_to_english})...")
+
+        try:
+            from deepgram import DeepgramClient, PrerecordedOptions, FileSource
+
+            deepgram = DeepgramClient(api_key)
+            payload: FileSource = {"buffer": file_bytes}
+
+            options_kwargs = {
+                "model": dg_model,
+                "language": dg_language,
+                "smart_format": True,
+                "punctuate": True
+            }
+
+            options = PrerecordedOptions(**options_kwargs)
+
+            kwargs = {}
+            if translate_to_english:
+                # Deepgram REST translation support
+                kwargs["addons"] = {"translate": "en"}
+
+            # Standard SDK v3 transcribe_file call
+            if hasattr(deepgram.listen, "rest"):
+                response = deepgram.listen.rest.v("1").transcribe_file(payload, options, **kwargs)
+            elif hasattr(deepgram.listen, "v1") and hasattr(deepgram.listen.v1, "media"):
+                # Compatibility with v7+ SDK if installed
+                response = deepgram.listen.v1.media.transcribe_file(
+                    request=file_bytes,
+                    model=dg_model,
+                    language=dg_language,
+                    smart_format=True,
+                    punctuate=True
+                )
+            else:
+                logger.warning("Unsupported Deepgram SDK client structure.")
+                return None
+
+            # Extract results from Deepgram response
+            if not response or not hasattr(response, "results"):
+                logger.warning("Deepgram response had no 'results' attribute.")
+                return None
+
+            channels = getattr(response.results, "channels", [])
+            if not channels or not channels[0].alternatives:
+                logger.warning("Deepgram response contained no channels or alternatives.")
+                return None
+
+            alt = channels[0].alternatives[0]
+            transcript = (getattr(alt, "transcript", "") or "").strip()
+
+            if not transcript:
+                logger.warning("Deepgram returned empty transcript.")
+                return None
+
+            confidence = float(getattr(alt, "confidence", 0.95) or 0.95)
+            duration = 0.0
+            if hasattr(response, "metadata") and hasattr(response.metadata, "duration"):
+                duration = float(response.metadata.duration or 0.0)
+
+            detected_lang = getattr(channels[0], "detected_language", None) or dg_language
+
+            # Build word-level segments
+            segments = []
+            words = getattr(alt, "words", []) or []
+            for w in words:
+                segments.append({
+                    "start": round(float(getattr(w, "start", 0.0) or 0.0), 2),
+                    "end": round(float(getattr(w, "end", 0.0) or 0.0), 2),
+                    "text": getattr(w, "word", "") or "",
+                    "confidence": round(float(getattr(w, "confidence", 1.0) or 1.0), 3)
+                })
+
+            return TranscriptionResult(
+                transcript=transcript,
+                detected_language=detected_lang,
+                language_probability=0.98,
+                confidence=round(confidence, 3),
+                duration_seconds=round(duration, 2),
+                model_size=f"deepgram-{dg_model}",
+                source_type="voice_transcript",
+                is_mock=False,
+                segments=segments
+            )
+
+        except Exception as e:
+            logger.warning(f"Deepgram transcription error: {e}")
+            return None
+
+    # =========================================================================
+    # PRIMARY ENGINE: Deepgram TTS (Text-to-Speech)
+    # =========================================================================
+    def text_to_speech(
+        self,
+        text: str,
+        model: Optional[str] = "aura-asteria-en"
+    ) -> bytes:
+        """
+        Synthesizes spoken audio from text using Deepgram TTS (Aura model).
+        Returns raw audio bytes (audio/mp3).
+        """
+        if not text or not text.strip():
+            raise TranscriptionError("Text for speech synthesis cannot be empty.")
+
+        api_key = (getattr(settings, "DEEPGRAM_API_KEY", "") or os.getenv("DEEPGRAM_API_KEY") or "").strip()
+        if not api_key:
+            raise TranscriptionError("DEEPGRAM_API_KEY is required for Text-to-Speech synthesis.")
+
+        try:
+            from deepgram import DeepgramClient, SpeakOptions
+
+            deepgram = DeepgramClient(api_key)
+            speak_opts = SpeakOptions(model=model or "aura-asteria-en")
+            resp = deepgram.speak.rest.v("1").stream_raw({"text": text}, speak_opts)
+            if resp.status_code == 200:
+                return resp.content
+            raise TranscriptionError(f"Deepgram TTS returned HTTP {resp.status_code}: {resp.text[:150]}")
+        except Exception as e:
+            logger.error(f"Deepgram TTS synthesis failed: {e}")
+            raise TranscriptionError(f"Deepgram TTS synthesis failed: {e}")
+
+    # =========================================================================
+    # UNIFIED TRANSCRIPTION ENTRYPOINT
+    # =========================================================================
+    def transcribe_audio(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        language: Optional[str] = None,
+        model_size: Optional[str] = None,
+        device: Optional[str] = None,
+        translate_to_english: bool = False
+    ) -> TranscriptionResult:
+        """
+        Transcribes audio bytes safely into text and metadata.
+        Does NOT automatically submit to the clinical case.
+        
+        Execution Flow:
+        1. Synthetic unit test mock check (b'MOCK_TRANSCRIPT:').
+        2. Deepgram STT (Active Default when USE_DEEPGRAM=true and DEEPGRAM_API_KEY is set).
+        3. Feature flag fallback / Legacy engines (Groq/HF Whisper, local faster-whisper, or mock).
+        """
+        if not file_bytes:
+            raise TranscriptionError("Uploaded audio file is empty.")
+
+        if len(file_bytes) > MAX_AUDIO_BYTES:
+            raise TranscriptionError(f"Audio file exceeds {MAX_AUDIO_BYTES // (1024 * 1024)} MB limit.")
+
+        ext = filename.lower().split(".")[-1] if "." in filename else ""
+        if ext not in ALLOWED_AUDIO_EXTENSIONS:
+            raise TranscriptionError(
+                f"Unsupported audio format '{ext}'. Allowed: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}"
+            )
+
+        model_size = (model_size or settings.ASR_MODEL_SIZE).lower()
+        if model_size not in ["base", "tiny", "small"]:
+            model_size = "base"
+        device = (device or settings.ASR_DEVICE).lower()
+
+        # Check if unit test synthetic mock transcript is present
+        if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # -------------------------------------------------------------
+        # 1. DEEPGRAM STT (Active Default via USE_DEEPGRAM feature flag)
+        # -------------------------------------------------------------
+        use_deepgram = getattr(settings, "USE_DEEPGRAM", True)
+        deepgram_api_key = (getattr(settings, "DEEPGRAM_API_KEY", "") or os.getenv("DEEPGRAM_API_KEY") or "").strip()
+
+        if use_deepgram and deepgram_api_key:
+            dg_result = self._deepgram_transcribe(
+                file_bytes=file_bytes,
+                filename=filename,
+                language=language,
+                model_size=model_size,
+                translate_to_english=translate_to_english
+            )
+            if dg_result:
+                return dg_result
+            logger.warning("Deepgram STT failed or was unreachable; checking fallback engines...")
+
+        # -------------------------------------------------------------
+        # 2. LEGACY / ALTERNATIVE STT ENGINES
+        # (Preserved under feature flag USE_DEEPGRAM=False or Deepgram fallback)
+        # -------------------------------------------------------------
+        asr_mode = (getattr(settings, "ASR_MODE", None) or os.getenv("ASR_MODE", "auto")).lower()
+        has_whisper_key = bool(settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN)
+
+        # Priority 2A: Hosted Whisper (Groq Cloud / Hugging Face router)
+        if asr_mode == "hosted" or (asr_mode == "auto" and has_whisper_key and settings.WHISPER_ENDPOINT):
+            hosted_res = self._hosted_transcribe(file_bytes, filename, language, model_size)
+            if hosted_res:
+                return hosted_res
+            if asr_mode == "hosted":
+                logger.warning("Hosted Whisper failed or was unreachable; falling back to deterministic mock to prevent consultation failure.")
+                return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # Priority 2B: Explicit mock mode
+        if asr_mode == "mock":
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # Priority 2C: Local faster-whisper execution
+        has_faster_whisper = False
+        try:
+            import faster_whisper
+            has_faster_whisper = True
+        except ImportError:
+            if asr_mode == "local":
+                raise TranscriptionError(
+                    "faster-whisper is not installed. Run 'pip install faster-whisper', "
+                    "or configure DEEPGRAM_API_KEY in .env."
+                )
+
+        if not has_faster_whisper:
+            logger.warning("No Deepgram or Whisper API key found and faster-whisper is not installed; falling back to mock.")
+            return self._mock_transcribe(file_bytes, filename, language, model_size)
+
+        # Run local faster-whisper
+        return self._local_whisper_transcribe(file_bytes, ext, language, model_size, device)
+
+    # =========================================================================
+    # PRESERVED CODE: Local faster-whisper execution
+    # =========================================================================
     def _get_whisper_model(self, model_size: str, device: str = "cpu"):
         """Lazy-loads and caches faster-whisper WhisperModel instance."""
         cache_key = f"{model_size}_{device}"
@@ -91,93 +359,18 @@ class TranscriptionService:
         except Exception as e:
             raise TranscriptionError(f"Failed to initialize faster-whisper model '{model_size}': {e}")
 
-    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
-        """Normalizes UI language strings ('Hindi', 'English', 'Hinglish', 'auto') to Whisper ISO codes or None."""
-        if not language:
-            return None
-        cleaned = language.strip().lower()
-        if cleaned in ("", "auto", "detect", "automatic", "none", "null", "hinglish", "mixed"):
-            return None
-        mapping = {
-            "english": "en",
-            "en": "en",
-            "eng": "en",
-            "hindi": "hi",
-            "hi": "hi",
-            "hin": "hi",
-        }
-        return mapping.get(cleaned, None)
-
-    def transcribe_audio(
+    def _local_whisper_transcribe(
         self,
         file_bytes: bytes,
-        filename: str,
-        language: Optional[str] = None,
-        model_size: Optional[str] = None,
-        device: Optional[str] = None
+        ext: str,
+        language: Optional[str],
+        model_size: str,
+        device: str
     ) -> TranscriptionResult:
-        """
-        Transcribes audio bytes safely into text and metadata.
-        Does NOT automatically submit to the clinical case.
-        """
-        if not file_bytes:
-            raise TranscriptionError("Uploaded audio file is empty.")
-
-        if len(file_bytes) > MAX_AUDIO_BYTES:
-            raise TranscriptionError(f"Audio file exceeds {MAX_AUDIO_BYTES // (1024 * 1024)} MB limit.")
-
-        ext = filename.lower().split(".")[-1] if "." in filename else ""
-        if ext not in ALLOWED_AUDIO_EXTENSIONS:
-            raise TranscriptionError(
-                f"Unsupported audio format '{ext}'. Allowed: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}"
-            )
-
-        model_size = (model_size or settings.ASR_MODEL_SIZE).lower()
-        if model_size not in ["base", "tiny", "small"]:
-            model_size = "base"
-        device = (device or settings.ASR_DEVICE).lower()
-
-        # Check if unit test synthetic mock transcript is present
-        if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
-            return self._mock_transcribe(file_bytes, filename, language, model_size)
-
-        # Determine execution mode: 'hosted', 'auto', 'local', or 'mock'
-        asr_mode = (getattr(settings, "ASR_MODE", None) or os.getenv("ASR_MODE", "auto")).lower()
-        has_api_key = bool(settings.WHISPER_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.HF_TOKEN)
-
-        # Priority 1: If hosted mode is chosen, or if auto mode with an API key / endpoint configured
-        if asr_mode == "hosted" or (asr_mode == "auto" and has_api_key and settings.WHISPER_ENDPOINT):
-            hosted_res = self._hosted_transcribe(file_bytes, filename, language, model_size)
-            if hosted_res:
-                return hosted_res
-            if asr_mode == "hosted":
-                logger.warning("Hosted Whisper failed or was unreachable; falling back to deterministic mock to prevent consultation failure.")
-                return self._mock_transcribe(file_bytes, filename, language, model_size)
-
-        # Priority 2: If mock mode explicitly requested
-        if asr_mode == "mock":
-            return self._mock_transcribe(file_bytes, filename, language, model_size)
-
-        # Priority 3: Local faster-whisper execution (only if explicitly requested or installed)
-        has_faster_whisper = False
-        try:
-            import faster_whisper
-            has_faster_whisper = True
-        except ImportError:
-            if asr_mode == "local":
-                raise TranscriptionError(
-                    "faster-whisper is not installed. Run 'pip install faster-whisper', "
-                    "or configure a free hosted Whisper API key (e.g. Groq) and set ASR_MODE=hosted."
-                )
-
-        if not has_faster_whisper:
-            logger.warning("No hosted Whisper API key found and faster-whisper is not installed; falling back to mock.")
-            return self._mock_transcribe(file_bytes, filename, language, model_size)
-
+        """Executes local faster-whisper inference."""
         whisper_model = self._get_whisper_model(model_size, device)
         normalized_lang = self._normalize_language(language)
 
-        # Domain prompt hints to guide Hindi/Hinglish clinical vocabulary
         initial_prompt = (
             "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, खून की उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
             if normalized_lang == "hi"
@@ -188,7 +381,6 @@ class TranscriptionService:
             )
         )
 
-        # Create temporary file for audio
         temp_dir = settings.CAREFLOW_TEMP_DIR if settings.CAREFLOW_TEMP_DIR else None
         temp_file = tempfile.NamedTemporaryFile(suffix=f".{ext}", dir=temp_dir, delete=False)
         temp_path = temp_file.name
@@ -224,7 +416,6 @@ class TranscriptionService:
                     word_count += 1
 
             full_transcript = " ".join(transcript_parts).strip()
-            # Approximate confidence from avg logprob
             avg_logprob = (total_logprob / word_count) if word_count > 0 else -1.0
             confidence = round(max(0.0, min(1.0, math.exp(avg_logprob))), 3) if avg_logprob < 0 else 0.95
 
@@ -250,6 +441,9 @@ class TranscriptionService:
                 except Exception as clean_err:
                     logger.warning(f"Failed to remove temp audio file {temp_path}: {clean_err}")
 
+    # =========================================================================
+    # PRESERVED CODE: Hosted Whisper API (Groq Cloud / Hugging Face router)
+    # =========================================================================
     def _hosted_transcribe(
         self,
         file_bytes: bytes,
@@ -276,13 +470,10 @@ class TranscriptionService:
         ).strip()
 
         # Intelligent API auto-routing:
-        # Case A: User supplied a Hugging Face token (starts with 'hf_' or HF_TOKEN is provided without a Groq key)
         if (raw_key and raw_key.startswith("hf_")) or (hf_token and not groq_key):
             api_key = hf_token or raw_key
-            # Route to live Hugging Face router if endpoint is empty, points to Groq, or uses legacy HF host
             if not endpoint or "groq.com" in endpoint or "api-inference.huggingface.co" in endpoint:
                 endpoint = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3"
-        # Case B: Groq key provided or standard OpenAI-compatible key
         elif groq_key or (raw_key and not raw_key.startswith("hf_")):
             api_key = groq_key or raw_key
             if not endpoint or "huggingface.co" in endpoint:
@@ -290,7 +481,6 @@ class TranscriptionService:
         else:
             api_key = raw_key
 
-        # Automatically rewrite deprecated Hugging Face domain if configured
         if endpoint and "api-inference.huggingface.co" in endpoint:
             endpoint = endpoint.replace("api-inference.huggingface.co", "router.huggingface.co/hf-inference")
 
@@ -299,7 +489,6 @@ class TranscriptionService:
 
         norm_lang = self._normalize_language(language)
 
-        # Clinical prompt conditioning to guide recognition of Hindi/Hinglish/English symptoms
         clinical_prompt = (
             "मरीज के लक्षण: बुखार, खांसी, सीने में दर्द, सांस लेने में तकलीफ, उल्टी, खून की उल्टी, पेट दर्द, सिरदर्द, कमजोरी।"
             if norm_lang == "hi"
@@ -324,7 +513,7 @@ class TranscriptionService:
         try:
             import requests
 
-            # Case 1: Hugging Face router / inference endpoint (raw binary audio payload)
+            # Hugging Face router (raw binary payload)
             if "huggingface.co" in endpoint:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
@@ -355,7 +544,7 @@ class TranscriptionService:
                 logger.warning(f"Hugging Face Whisper returned HTTP {resp.status_code}: {resp.text[:150]}")
                 return None
 
-            # Case 2: OpenAI / Groq compatible endpoint (multipart/form-data)
+            # OpenAI / Groq compatible endpoint (multipart/form-data)
             headers = {"Authorization": f"Bearer {api_key}"}
             model_name = getattr(settings, "WHISPER_MODEL", "whisper-large-v3") or "whisper-large-v3"
 
@@ -389,6 +578,9 @@ class TranscriptionService:
             logger.warning(f"Failed calling hosted Whisper endpoint: {e}")
             return None
 
+    # =========================================================================
+    # PRESERVED CODE: Deterministic clinical mock transcription
+    # =========================================================================
     def _mock_transcribe(
         self,
         file_bytes: bytes,
@@ -402,7 +594,7 @@ class TranscriptionService:
         """
         fname_lower = filename.lower()
 
-        # Check if the audio file contains synthetic text header (for unit tests)
+        # Check if the audio file contains synthetic test payload
         if file_bytes.startswith(b"MOCK_TRANSCRIPT:"):
             try:
                 text = file_bytes[len(b"MOCK_TRANSCRIPT:"):].decode("utf-8").strip()
@@ -422,7 +614,6 @@ class TranscriptionService:
                 pass
 
         norm_l = self._normalize_language(language)
-        # Check for scenario markers in filename for deterministic testing
         if "cardiac" in fname_lower or "chest" in fname_lower:
             text = "I have severe crushing chest pain radiating to my left arm."
             lang = "en"
@@ -439,7 +630,7 @@ class TranscriptionService:
                 transcript=text,
                 detected_language="en",
                 language_probability=0.65,
-                confidence=0.52,  # Low confidence flagged
+                confidence=0.52,
                 duration_seconds=3.5,
                 model_size=model_size,
                 source_type="voice_transcript",

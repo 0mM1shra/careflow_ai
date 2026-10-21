@@ -26,7 +26,13 @@ class Settings:
     MODEL_TIMEOUT_SECONDS: int = int(os.getenv("MODEL_TIMEOUT_SECONDS", "45"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
 
-    # ASR / Voice Transcription Configuration
+    # Deepgram Configuration (Hinglish & Accent Optimized STT, Translation, TTS)
+    USE_DEEPGRAM: bool = os.getenv("USE_DEEPGRAM", "true").lower() == "true"
+    DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
+    DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova-2")
+    DEEPGRAM_LANGUAGE: str = os.getenv("DEEPGRAM_LANGUAGE", "en-IN")
+
+    # Legacy ASR / Whisper Voice Transcription Configuration (Preserved under feature flag)
     ASR_MODE: str = os.getenv("ASR_MODE", "auto").lower()              # 'auto', 'local', 'mock', 'hosted'
     ASR_MODEL_SIZE: str = os.getenv("ASR_MODEL_SIZE", "base").lower()  # 'base', 'tiny', 'small'
     ASR_DEVICE: str = os.getenv("ASR_DEVICE", "cpu").lower()            # 'cpu' or 'cuda'
