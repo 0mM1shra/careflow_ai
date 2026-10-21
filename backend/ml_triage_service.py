@@ -2,7 +2,7 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union, List, Tuple
 from pathlib import Path
 import pandas as pd
 import joblib
@@ -27,6 +27,7 @@ FEATURE_COLUMNS: List[str] = [
     "sys_systemic",
     "sys_eent",
 ]
+EXPECTED_FEATURE_COLUMNS = FEATURE_COLUMNS
 
 # Population median fallbacks derived from careflow_diverse_ml.csv
 DEFAULT_VITALS: Dict[str, Any] = {
@@ -132,10 +133,11 @@ def is_model_out_of_date(model_path: Path, dataset_path: Path, loaded_model: Opt
     return False
 
 
-def get_lgbm_model() -> Any:
+def get_lgbm_model(allow_auto_train: bool = False) -> Optional[Any]:
     """
     Retrieves or loads the cached LightGBM model singleton.
-    Auto-trains from careflow_diverse_ml.csv if the artifact is missing or out of date.
+    Does NOT train a new classifier silently at application startup.
+    Returns None if the artifact is missing or unreadable.
     """
     global _MODEL_INSTANCE
     if _MODEL_INSTANCE is not None:
@@ -146,29 +148,34 @@ def get_lgbm_model() -> Any:
     if _DEFAULT_MODEL_PATH.exists():
         try:
             loaded = joblib.load(_DEFAULT_MODEL_PATH)
-            if not is_model_out_of_date(_DEFAULT_MODEL_PATH, primary_dataset, loaded):
-                logger.info(f"Loaded existing LightGBM model from {_DEFAULT_MODEL_PATH}")
-                _MODEL_INSTANCE = loaded
-                return _MODEL_INSTANCE
-            else:
-                logger.info("Existing LightGBM model is out of date relative to updated dataset. Re-training...")
+            logger.info(f"Loaded existing LightGBM model from {_DEFAULT_MODEL_PATH}")
+            _MODEL_INSTANCE = loaded
+            return _MODEL_INSTANCE
         except Exception as e:
-            logger.warning(f"Failed to load existing model ({e}); re-training...")
+            logger.warning(f"Failed to load existing model ({e})")
+            if not allow_auto_train:
+                return None
 
-    # Auto-training fallback
-    _MODEL_INSTANCE = train_lgbm_model(primary_dataset, _DEFAULT_MODEL_PATH, class_weight="balanced")
-    return _MODEL_INSTANCE
+    if allow_auto_train:
+        logger.info("Explicit auto-training enabled. Training model artifact...")
+        _MODEL_INSTANCE = train_lgbm_model(primary_dataset, _DEFAULT_MODEL_PATH, class_weight="balanced")
+        return _MODEL_INSTANCE
+
+    logger.warning(f"LightGBM model artifact not found at {_DEFAULT_MODEL_PATH}. Silent auto-training disabled.")
+    return None
 
 
-def extract_vitals_from_dict_or_text(
+def extract_vitals_with_metadata(
     vitals_dict: Optional[Union[Dict[str, Any], str]] = None,
     text_content: Optional[str] = None
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], List[str]]:
     """
     Extracts continuous lab/vital parameters (age, heart_rate, systolic_bp, spo2_pct, temp_f)
     from a dictionary or parses them from clinical text/reports.
+    Tracks and returns the list of imputed features populated from population defaults.
     """
     vitals = dict(DEFAULT_VITALS)
+    imputed_fields = list(DEFAULT_VITALS.keys())
 
     # If vitals_dict was passed as string, treat as text_content or parse JSON
     if isinstance(vitals_dict, str):
@@ -188,6 +195,8 @@ def extract_vitals_from_dict_or_text(
         if "age" in vitals_dict and vitals_dict["age"] is not None:
             try:
                 vitals["age"] = int(vitals_dict["age"])
+                if "age" in imputed_fields:
+                    imputed_fields.remove("age")
             except (ValueError, TypeError):
                 pass
 
@@ -196,6 +205,8 @@ def extract_vitals_from_dict_or_text(
             if k in vitals_dict and vitals_dict[k] is not None:
                 try:
                     vitals["heart_rate"] = int(vitals_dict[k])
+                    if "heart_rate" in imputed_fields:
+                        imputed_fields.remove("heart_rate")
                     break
                 except (ValueError, TypeError):
                     pass
@@ -208,6 +219,8 @@ def extract_vitals_from_dict_or_text(
                     val = val.split("/")[0]
                 try:
                     vitals["systolic_bp"] = int(float(re.sub(r"[^\d.]", "", val)))
+                    if "systolic_bp" in imputed_fields:
+                        imputed_fields.remove("systolic_bp")
                     break
                 except (ValueError, TypeError):
                     pass
@@ -217,6 +230,8 @@ def extract_vitals_from_dict_or_text(
             if k in vitals_dict and vitals_dict[k] is not None:
                 try:
                     vitals["spo2_pct"] = int(float(re.sub(r"[^\d.]", "", str(vitals_dict[k]))))
+                    if "spo2_pct" in imputed_fields:
+                        imputed_fields.remove("spo2_pct")
                     break
                 except (ValueError, TypeError):
                     pass
@@ -230,6 +245,8 @@ def extract_vitals_from_dict_or_text(
                     if t_val < 45.0:
                         t_val = (t_val * 9.0 / 5.0) + 32.0
                     vitals["temp_f"] = round(t_val, 1)
+                    if "temp_f" in imputed_fields:
+                        imputed_fields.remove("temp_f")
                     break
                 except (ValueError, TypeError):
                     pass
@@ -238,24 +255,39 @@ def extract_vitals_from_dict_or_text(
     if text_content:
         # HR regex (e.g. "HR 109 bpm", "Heart Rate: 128 bpm", "pulse 95")
         hr_match = re.search(r"\b(?:HR|pulse|heart\s*rate)\s*[:=]?\s*(\d{2,3})\s*(?:bpm)?\b", text_content, re.IGNORECASE)
-        if hr_match and vitals["heart_rate"] == DEFAULT_VITALS["heart_rate"]:
+        if hr_match and "heart_rate" in imputed_fields:
             vitals["heart_rate"] = int(hr_match.group(1))
+            imputed_fields.remove("heart_rate")
 
         # BP regex (e.g. "BP 104/70 mmHg", "Systolic BP: 165 mmHg", "blood pressure 120")
         bp_match = re.search(r"\b(?:systolic\s*bp|systolic|bp|blood\s*pressure)\s*[:=]?\s*(\d{2,3})(?:/\d{2,3})?\s*(?:mmHg)?\b", text_content, re.IGNORECASE)
-        if bp_match and vitals["systolic_bp"] == DEFAULT_VITALS["systolic_bp"]:
+        if bp_match and "systolic_bp" in imputed_fields:
             vitals["systolic_bp"] = int(bp_match.group(1))
+            imputed_fields.remove("systolic_bp")
 
         # SpO2 regex (e.g. "SpO2 92%", "SpO2: 91%", "oxygen 94%")
         spo2_match = re.search(r"\b(?:SpO2|O2\s*sat|oxygen)\s*[:=]?\s*(\d{2,3})\s*%?\b", text_content, re.IGNORECASE)
-        if spo2_match and vitals["spo2_pct"] == DEFAULT_VITALS["spo2_pct"]:
+        if spo2_match and "spo2_pct" in imputed_fields:
             vitals["spo2_pct"] = int(spo2_match.group(1))
+            imputed_fields.remove("spo2_pct")
 
         # Temp regex (e.g. "Temp 97.0 F", "Temp: 102.4 F", "temperature: 101.8 F")
         temp_match = re.search(r"\b(?:Temp|temperature)\s*[:=]?\s*(\d{2,3}(?:\.\d+)?)\s*(?:F|deg F)?\b", text_content, re.IGNORECASE)
-        if temp_match and vitals["temp_f"] == DEFAULT_VITALS["temp_f"]:
+        if temp_match and "temp_f" in imputed_fields:
             vitals["temp_f"] = float(temp_match.group(1))
+            imputed_fields.remove("temp_f")
 
+    return vitals, imputed_fields
+
+
+def extract_vitals_from_dict_or_text(
+    vitals_dict: Optional[Union[Dict[str, Any], str]] = None,
+    text_content: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Backward-compatible wrapper returning only the extracted vitals dictionary.
+    """
+    vitals, _ = extract_vitals_with_metadata(vitals_dict, text_content)
     return vitals
 
 
@@ -303,8 +335,8 @@ def _map_slm_and_vitals_to_dataframe(
         if lab_vitals_dict is None and "vitals" in slm_data and isinstance(slm_data["vitals"], dict):
             lab_vitals_dict = slm_data["vitals"]
 
-    # Extract continuous vitals
-    vitals = extract_vitals_from_dict_or_text(lab_vitals_dict)
+    # Extract continuous vitals with explicit imputed fields tracking
+    vitals, imputed_fields = extract_vitals_with_metadata(lab_vitals_dict)
 
     # Initialize feature row
     row: Dict[str, Any] = {
@@ -421,7 +453,9 @@ def _map_slm_and_vitals_to_dataframe(
             # Default to sys_systemic for safety if completely undetermined
             row["sys_systemic"] = 1
 
-    return pd.DataFrame([row], columns=FEATURE_COLUMNS)
+    df = pd.DataFrame([row], columns=FEATURE_COLUMNS)
+    df.attrs["imputed_features"] = imputed_fields
+    return df
 
 
 def predict_urgency_lgbm(
@@ -438,6 +472,8 @@ def predict_urgency_lgbm(
     """
     try:
         model = get_lgbm_model()
+        if model is None:
+            return "P3"
         df_features = _map_slm_and_vitals_to_dataframe(slm_json_output, lab_vitals_dict)
         pred_class = int(model.predict(df_features)[0])
         return TARGET_PRIORITY_MAP.get(pred_class, "P3")
@@ -452,11 +488,26 @@ def predict_urgency_lgbm_with_details(
     lab_vitals_dict: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Predicts urgency and returns detailed class probabilities and feature vector.
+    Predicts urgency and returns detailed class probabilities, feature vector,
+    imputed features list, and model readiness status.
     """
     try:
-        model = get_lgbm_model()
         df_features = _map_slm_and_vitals_to_dataframe(slm_json_output, lab_vitals_dict)
+        imputed_fields = getattr(df_features, "attrs", {}).get("imputed_features", [])
+
+        model = get_lgbm_model()
+        if model is None:
+            return {
+                "ml_model_triage": None,
+                "predicted_tier": None,
+                "predicted_class": None,
+                "model_status": "unavailable",
+                "probabilities": {},
+                "feature_vector": df_features.iloc[0].to_dict(),
+                "imputed_features": imputed_fields,
+                "error": "LightGBM model artifact not loaded. Train via train_lgbm_model() or check backend/models."
+            }
+
         pred_class = int(model.predict(df_features)[0])
         probabilities = {}
         if hasattr(model, "predict_proba"):
@@ -470,17 +521,21 @@ def predict_urgency_lgbm_with_details(
             "ml_model_triage": tier_str,
             "predicted_tier": tier_str,
             "predicted_class": pred_class,
+            "model_status": "available",
             "probabilities": probabilities,
             "feature_vector": df_features.iloc[0].to_dict(),
+            "imputed_features": imputed_fields,
         }
     except Exception as e:
         logger.error(f"Error in predict_urgency_lgbm_with_details: {e}")
         return {
-            "ml_model_triage": "P2",
-            "predicted_tier": "P2",
-            "predicted_class": 2,
+            "ml_model_triage": None,
+            "predicted_tier": None,
+            "predicted_class": None,
+            "model_status": "error",
             "probabilities": {},
             "feature_vector": {},
+            "imputed_features": [],
             "error": str(e),
         }
 

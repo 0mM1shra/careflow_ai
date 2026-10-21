@@ -10,12 +10,19 @@ load_dotenv(BASE_DIR / ".env")
 
 class Settings:
     # Model execution mode: 'mock', 'hosted', or 'local' (or 'peft')
-    MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "mock").lower()
+    MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "local").lower()
     
     # Model Identifier & Fine-Tuned LoRA Adapter
     MEDGEMMA_MODEL_ID: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
     MEDGEMMA_BASE_MODEL_ID: str = os.getenv("MEDGEMMA_BASE_MODEL_ID", "unsloth/medgemma-4b-it-unsloth-bnb-4bit")
     MEDGEMMA_ADAPTER_PATH: str = os.getenv("MEDGEMMA_ADAPTER_PATH", str(BASE_DIR / "careflow-medgemma-final"))
+    
+    # Provider Abstraction Configuration:
+    # 'standard_medgemma' (hosted API / base model) vs 'finetuned_medgemma' (local Ollama 'careflow-slm' / PEFT)
+    DEFAULT_MEDGEMMA_PROVIDER: str = os.getenv("DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "careflow-slm")
+    STANDARD_MEDGEMMA_MODEL_ID: str = os.getenv("STANDARD_MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
     
     # Hosted Endpoint & API Key (supports MEDGEMMA_API_KEY or standard HF_TOKEN)
     MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "")
@@ -27,6 +34,7 @@ class Settings:
     # Model timeouts and retries
     MODEL_TIMEOUT_SECONDS: int = int(os.getenv("MODEL_TIMEOUT_SECONDS", "45"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
+    MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "15"))
 
     # Deepgram Configuration (Hinglish & Accent Optimized STT, Translation, TTS)
     USE_DEEPGRAM: bool = os.getenv("USE_DEEPGRAM", "true").lower() == "true"

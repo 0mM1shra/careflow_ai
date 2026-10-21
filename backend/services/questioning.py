@@ -200,11 +200,12 @@ class AdaptiveQuestioningService:
         current_question_count: int,
         assistant_messages: Optional[List[str]] = None,
         evidence_state: Optional[Dict[str, Any]] = None,
-        preferred_language: str = "English"
+        preferred_language: str = "English",
+        provider: Optional[str] = None
     ) -> FollowUpQuestionOutput:
         """
-        Determines the next follow-up question, guaranteeing no repetitive questions.
-        Prioritizes symptom-specific queries before falling back to general dimensions.
+        Determines the next follow-up question using the selected MedGemma provider.
+        Maintains bilingual question state (EN + HI) and tracks anti-repetition.
         """
         assistant_messages = assistant_messages or []
 
@@ -213,9 +214,12 @@ class AdaptiveQuestioningService:
             logger.info(f"Reached maximum question limit ({settings.MAX_FOLLOWUP_QUESTIONS}). Ending questioning.")
             return FollowUpQuestionOutput(
                 next_question=None,
+                next_question_en=None,
+                next_question_hi=None,
                 reason_for_question=f"Reached maximum limit of {settings.MAX_FOLLOWUP_QUESTIONS} follow-up questions. Intake ready for human clinician review.",
                 target_field="limit_reached",
-                is_terminal=True
+                is_terminal=True,
+                selected_provider=provider or settings.DEFAULT_MEDGEMMA_PROVIDER
             )
 
         full_patient_text = " ".join(patient_messages)
@@ -226,41 +230,69 @@ class AdaptiveQuestioningService:
         if evidence_state:
             vitals = evidence_state.get("vitals", {})
 
-        # Always run fine-tuned MedGemma SLM to extract features for ML classifier
+        # Run selected MedGemma SLM provider to extract features and generate bilingual question
         slm_turn = {}
         try:
             slm_turn = medgemma_service.generate_slm_triage_turn(
                 conversation_history=patient_messages,
                 vitals=vitals,
-                preferred_language=lang
+                preferred_language=lang,
+                provider=provider
             )
         except Exception as slm_err:
-            logger.warning(f"Fine-tuned SLM questioning extraction encountered: {slm_err}")
+            logger.warning(f"SLM questioning extraction encountered error: {slm_err}")
+            # If explicit provider error and not in mock mode, re-raise to avoid silent fallback
+            if isinstance(slm_err, ProviderUnavailableError) and settings.MEDGEMMA_MODE != "mock":
+                raise
+
+        q_en = slm_turn.get("next_question_en")
+        q_hi = slm_turn.get("next_question_hi")
 
         # Step 1: Check symptom-specific questions first (high-acuity red flags: hematemesis, radiation, etc.)
         cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
         if cat_q and not cat_q.is_terminal:
             cat_q.slm_extraction = slm_turn
+            cat_q.next_question_en = cat_q.next_question if lang.lower() != "hindi" else q_en
+            cat_q.next_question_hi = cat_q.next_question if lang.lower() == "hindi" else q_hi
+            cat_q.selected_provider = provider or slm_turn.get("selected_provider", "finetuned_medgemma")
+            cat_q.validation_status = slm_turn.get("validation_status", "valid")
             return cat_q
 
-        # Step 2: If catalog questions have been addressed, use fine-tuned SLM bilingual question
+        # Step 2: Use MedGemma model's generated bilingual question
         if slm_turn:
-            if lang.lower() == "hindi":
-                q_text = slm_turn.get("next_question_hi")
-            else:
-                q_text = slm_turn.get("next_question_en") or slm_turn.get("next_question_hi")
+            q_text = q_hi if lang.lower() == "hindi" else (q_en or q_hi)
 
             if q_text and not cls._is_duplicate_question(q_text, assistant_messages):
                 return FollowUpQuestionOutput(
                     next_question=q_text,
+                    next_question_en=q_en or q_text,
+                    next_question_hi=q_hi or q_text,
                     reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
                     target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
                     is_terminal=False,
-                    slm_extraction=slm_turn
+                    slm_extraction=slm_turn,
+                    selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
+                    validation_status=slm_turn.get("validation_status", "valid")
                 )
 
-        cat_q.slm_extraction = slm_turn
-        return cat_q
+        if cat_q:
+            cat_q.slm_extraction = slm_turn
+            cat_q.next_question_en = q_en
+            cat_q.next_question_hi = q_hi
+            cat_q.selected_provider = provider or slm_turn.get("selected_provider", "finetuned_medgemma")
+            return cat_q
+
+        # Fallback question
+        return FollowUpQuestionOutput(
+            next_question="Could you describe any other symptoms or discomfort you are experiencing?",
+            next_question_en="Could you describe any other symptoms or discomfort you are experiencing?",
+            next_question_hi="क्या आप अपने अन्य लक्षणों या किसी अन्य परेशानी के बारे में बता सकते हैं?",
+            reason_for_question="General exploratory inquiry to capture unaddressed patient symptoms.",
+            target_field="general_symptoms",
+            is_terminal=False,
+            slm_extraction=slm_turn,
+            selected_provider=provider or "finetuned_medgemma"
+        )
 
     @classmethod
     def _is_duplicate_question(cls, question: str, previous_questions: List[str]) -> bool:

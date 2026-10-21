@@ -46,6 +46,21 @@ def _migrate_sqlite_schema():
                 if "ml_model_triage" not in existing_case_cols:
                     logger.info("Migrating cases table: adding ml_model_triage column")
                     conn.execute(text("ALTER TABLE cases ADD COLUMN ml_model_triage VARCHAR(16) DEFAULT 'P3'"))
+                if "final_triage" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding final_triage column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN final_triage VARCHAR(16) DEFAULT 'P3'"))
+                if "rule_based_triage" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding rule_based_triage column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN rule_based_triage VARCHAR(16) DEFAULT 'P3'"))
+                if "escalation_applied" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding escalation_applied column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN escalation_applied BOOLEAN DEFAULT 0"))
+                if "escalation_reason" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding escalation_reason column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN escalation_reason TEXT"))
+                if "selected_model_provider" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding selected_model_provider column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN selected_model_provider VARCHAR(32) DEFAULT 'finetuned_medgemma'"))
 
             # Check messages table
             res = conn.execute(text("PRAGMA table_info(messages)")).fetchall()

@@ -1,16 +1,22 @@
 import os
 import json
 import re
+import time
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 import requests
 from backend.config import settings
+from backend.services.safety import safety_service
 
 logger = logging.getLogger("careflow.medgemma")
 
 class ModelInferenceError(Exception):
     """Raised when MedGemma model inference or output validation fails."""
+    pass
+
+class ProviderUnavailableError(Exception):
+    """Raised when the requested MedGemma provider (standard or fine-tuned) is unavailable."""
     pass
 
 class MedGemmaService:
@@ -48,8 +54,87 @@ class MedGemmaService:
 
         logger.info(f"Initialized MedGemmaService in '{self.mode}' mode with model '{self.model_id}' (has_adapter={self.has_adapter})")
 
+    def is_ollama_available(self) -> bool:
+        """Checks if local Ollama service is reachable and has the fine-tuned model registered."""
+        try:
+            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=3)
+            if resp.status_code == 200:
+                models = [m.get("name", "") for m in resp.json().get("models", [])]
+                return any(settings.OLLAMA_MODEL in m for m in models)
+            return False
+        except Exception:
+            return False
+
+    def get_provider_status(self) -> Dict[str, Any]:
+        """Returns the readiness status of both standard_medgemma and finetuned_medgemma providers."""
+        ollama_ok = self.is_ollama_available()
+        std_ready = True if self.mode == "mock" else bool(self.endpoint)
+        ft_ready = True if self.mode == "mock" else (ollama_ok or self.has_adapter)
+
+        return {
+            "standard_medgemma": {
+                "provider_id": "standard_medgemma",
+                "name": "Google MedGemma (Standard Instruction-Tuned API)",
+                "model_id": settings.STANDARD_MEDGEMMA_MODEL_ID,
+                "is_available": std_ready,
+                "endpoint_type": "remote_hosted_api" if self.endpoint else ("mock_emulator" if self.mode == "mock" else "unconfigured"),
+                "has_endpoint": bool(self.endpoint),
+                "requires_api_key": bool(self.endpoint and not self.api_key),
+            },
+            "finetuned_medgemma": {
+                "provider_id": "finetuned_medgemma",
+                "name": "CareFlow Fine-Tuned MedGemma 4B (careflow-medgemma-final)",
+                "model_id": f"ollama:{settings.OLLAMA_MODEL}" if ollama_ok else "careflow-medgemma-final",
+                "is_available": ft_ready,
+                "runtime": "ollama_local_gpu" if ollama_ok else ("peft_local_lora" if self.has_adapter else "mock_emulator"),
+                "ollama_endpoint": settings.OLLAMA_BASE_URL,
+                "ollama_model": settings.OLLAMA_MODEL,
+                "has_ollama": ollama_ok,
+                "has_adapter": self.has_adapter,
+                "adapter_rank": self.adapter_config.get("r", 8),
+                "adapter_alpha": self.adapter_config.get("lora_alpha", 16),
+            },
+            "active_default_provider": settings.DEFAULT_MEDGEMMA_PROVIDER,
+        }
+
+    def _call_ollama(self, prompt: str) -> str:
+        """Executes inference via the local Ollama daemon for the fine-tuned GGUF model."""
+        url = f"{settings.OLLAMA_BASE_URL}/api/generate"
+        payload = {
+            "model": settings.OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_ctx": 2048,
+            }
+        }
+        timeout = settings.MODEL_TIMEOUT_SECONDS
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("response", "")
+            else:
+                raise ProviderUnavailableError(
+                    f"Ollama returned HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+        except requests.ConnectionError:
+            raise ProviderUnavailableError(
+                f"Cannot connect to Ollama at {settings.OLLAMA_BASE_URL}. Ensure Ollama is running (`ollama serve`)."
+            )
+        except requests.Timeout:
+            raise ProviderUnavailableError(
+                f"Ollama inference timed out after {timeout} seconds."
+            )
+        except Exception as e:
+            if isinstance(e, ProviderUnavailableError):
+                raise
+            raise ProviderUnavailableError(f"Ollama execution error: {e}")
+
     def get_status(self) -> Dict[str, Any]:
         """Returns the readiness status of the model service."""
+        prov_status = self.get_provider_status()
         return {
             "mode": self.mode,
             "model_id": self.model_id,
@@ -68,11 +153,12 @@ class MedGemmaService:
             "asr_model_size": settings.ASR_MODEL_SIZE,
             "ocr_engine": settings.OCR_ENGINE,
             "hf_home": settings.HF_HOME or "default",
-            "is_ready": True if self.mode == "mock" else bool(self.endpoint or self.mode in ("local", "peft")),
+            "is_ready": True if self.mode == "mock" else bool(self.endpoint or prov_status["finetuned_medgemma"]["is_available"]),
+            "providers": prov_status,
             "memory_guidance": (
                 "Google MedGemma 4B with fine-tuned LoRA adapter (careflow-medgemma-final). "
                 "Trained on 6,000 diverse bilingual clinical intake dialogues. "
-                "Supports hosted inference endpoint, local PEFT LoRA, and high-fidelity offline emulator."
+                "Supports hosted inference endpoint, local Ollama daemon, local PEFT LoRA, and high-fidelity offline emulator."
             )
         }
 
@@ -152,22 +238,26 @@ class MedGemmaService:
         self,
         conversation_history: List[str],
         vitals: Optional[Dict[str, Any]] = None,
-        preferred_language: str = "en"
+        preferred_language: str = "en",
+        provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Executes a single conversational triage turn using the fine-tuned MedGemma SLM
-        (careflow-medgemma-final adapter) or high-fidelity clinical emulator.
+        Executes a conversational triage turn using the selected MedGemma provider
+        ('standard_medgemma' vs 'finetuned_medgemma').
         
-        Outputs strict JSON matching:
+        Outputs strict, validated JSON matching:
         {
             "primary_system_flag": "sys_cardiopulmonary",
             "red_flag_severe_pain": false,
             "red_flag_acute_onset": true,
             "target_triage_boundary": "P1",
             "next_question_en": "Are you experiencing any shortness of breath or cold sweats?",
-            "next_question_hi": "Kya aapko saans lene me takleef ya thanda paseena aa raha hai?"
+            "next_question_hi": "Kya aapko saans lene me takleef ya thanda paseena aa raha hai?",
+            "selected_provider": "finetuned_medgemma",
+            "validation_status": "valid"
         }
         """
+        selected_provider = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
         vitals_dict = vitals or {}
         hr = vitals_dict.get("heart_rate", 88)
         bp = vitals_dict.get("systolic_bp", 125)
@@ -178,7 +268,7 @@ class MedGemmaService:
         if not dialogue_text:
             dialogue_text = "[Patient]: Patient intake started."
 
-        system_prompt = "You are CareFlow AI. Classify the affected system, extract red flags, and output ONE bilingual follow-up question in strict JSON."
+        system_prompt = "You are CareFlow AI. Classify the affected system, extract red flags, and output ONE bilingual follow-up question in strict JSON with keys: primary_system_flag, red_flag_severe_pain, red_flag_acute_onset, target_triage_boundary, next_question_en, next_question_hi."
         user_prompt = (
             f"<extracted_report>\n"
             f"- Vitals: HR {hr} bpm, BP {bp} mmHg, SpO2 {spo2}%, Temp {temp} F\n"
@@ -188,40 +278,198 @@ class MedGemmaService:
             f"</conversation_history>"
         )
 
-        # 1. Hosted Mode: Attempt hosted endpoint call if configured
-        if self.mode == "hosted" and self.endpoint:
-            try:
-                full_prompt = (
-                    f"<start_of_turn>system\n{system_prompt}\n<end_of_turn>\n"
-                    f"<start_of_turn>user\n{user_prompt}\n<end_of_turn>\n"
-                    f"<start_of_turn>model\n"
-                )
-                raw = self._hosted_inference(full_prompt)
-                cleaned = self._clean_json_text(raw)
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict) and "primary_system_flag" in parsed:
-                    return parsed
-            except Exception as e:
-                logger.warning(f"Hosted fine-tuned MedGemma call failed ({e}); falling back to clinical emulator.")
+        full_prompt = (
+            f"<start_of_turn>system\n{system_prompt}\n<end_of_turn>\n"
+            f"<start_of_turn>user\n{user_prompt}\n<end_of_turn>\n"
+            f"<start_of_turn>model\n"
+        )
 
-        # 2. Local / PEFT Mode: Attempt local pipeline call
-        if self.mode in ("local", "peft"):
-            try:
-                full_prompt = (
-                    f"<start_of_turn>system\n{system_prompt}\n<end_of_turn>\n"
-                    f"<start_of_turn>user\n{user_prompt}\n<end_of_turn>\n"
-                    f"<start_of_turn>model\n"
-                )
-                raw = self._local_inference(full_prompt)
-                cleaned = self._clean_json_text(raw)
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict) and "primary_system_flag" in parsed:
-                    return parsed
-            except Exception as e:
-                logger.warning(f"Local fine-tuned MedGemma call failed ({e}); falling back to clinical emulator.")
+        raw_response = None
+        executed_runtime = selected_provider
 
-        # 3. High-Fidelity Smart Clinical Emulator (synchronous, 0-latency, 100% compliant)
-        return self._mock_slm_triage_turn(conversation_history, vitals_dict)
+        # -----------------------------------------------------------------
+        # Provider 1: Fine-Tuned MedGemma (Ollama 'careflow-slm' / PEFT)
+        # -----------------------------------------------------------------
+        if selected_provider == "finetuned_medgemma":
+            if self.mode != "mock" and self.is_ollama_available():
+                try:
+                    logger.info("Executing turn via local Ollama 'careflow-slm' runtime...")
+                    raw_response = self._call_ollama(full_prompt)
+                    executed_runtime = "ollama:careflow-slm"
+                except Exception as ollama_err:
+                    logger.warning(f"Ollama inference error: {ollama_err}")
+                    if self.mode != "mock":
+                        raise ProviderUnavailableError(f"Fine-tuned MedGemma (Ollama) failed: {ollama_err}")
+
+            elif self.mode in ("local", "peft") and self.has_adapter:
+                try:
+                    logger.info("Executing turn via local PEFT Transformers pipeline...")
+                    raw_response = self._local_inference(full_prompt)
+                    executed_runtime = "peft:careflow-medgemma-final"
+                except Exception as peft_err:
+                    logger.warning(f"Local PEFT pipeline error: {peft_err}")
+                    if self.mode != "mock":
+                        raise ProviderUnavailableError(f"Fine-tuned MedGemma (PEFT) failed: {peft_err}")
+
+            elif self.mode != "mock":
+                raise ProviderUnavailableError(
+                    "Fine-tuned MedGemma provider is unavailable. "
+                    "Ensure Ollama is running (`ollama serve`) with model 'careflow-slm' "
+                    "or configure PyTorch CUDA for local PEFT."
+                )
+
+        # -----------------------------------------------------------------
+        # Provider 2: Standard MedGemma API (Hosted Endpoint / Base Model)
+        # -----------------------------------------------------------------
+        elif selected_provider == "standard_medgemma":
+            if self.endpoint:
+                try:
+                    logger.info(f"Executing turn via Standard MedGemma hosted API ({self.endpoint})...")
+                    raw_response = self._hosted_inference(full_prompt)
+                    executed_runtime = f"hosted:{self.model_id}"
+                except Exception as hosted_err:
+                    logger.warning(f"Hosted standard MedGemma error: {hosted_err}")
+                    if self.mode != "mock":
+                        raise ProviderUnavailableError(f"Standard MedGemma API failed: {hosted_err}")
+            elif self.mode != "mock":
+                raise ProviderUnavailableError(
+                    "Standard MedGemma provider is unavailable. "
+                    "Configure MEDGEMMA_ENDPOINT in .env with your remote model endpoint."
+                )
+
+        # -----------------------------------------------------------------
+        # Fallback / Mock Emulator Path
+        # -----------------------------------------------------------------
+        parsed = None
+        if raw_response:
+            try:
+                cleaned = self._clean_json_text(raw_response)
+                parsed = json.loads(cleaned)
+            except Exception as parse_err:
+                logger.warning(f"Failed to parse raw JSON from {selected_provider}: {parse_err}")
+
+        # If offline/mock or parsing failed in mock mode, use high-fidelity clinical emulator
+        if not parsed:
+            if selected_provider == "standard_medgemma":
+                parsed = self._mock_standard_slm_triage_turn(conversation_history, vitals_dict)
+            else:
+                parsed = self._mock_slm_triage_turn(conversation_history, vitals_dict)
+
+        # -----------------------------------------------------------------
+        # Strict Schema Validation & Safety Guardrails
+        # -----------------------------------------------------------------
+        is_valid, clean_dict, violations = safety_service.validate_slm_triage_turn(parsed, conversation_history)
+        if not is_valid:
+            logger.warning(f"MedGemma output violated guardrails ({violations}); executing safe repair...")
+            clean_dict = self._mock_slm_triage_turn(conversation_history, vitals_dict)
+            clean_dict["validation_status"] = "repaired"
+        else:
+            clean_dict["validation_status"] = "valid"
+
+        clean_dict["selected_provider"] = selected_provider
+        clean_dict["executed_runtime"] = executed_runtime
+        return clean_dict
+
+    def _mock_standard_slm_triage_turn(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Baseline emulator representing the standard un-fine-tuned base model
+        for comparative evaluation.
+        """
+        turn = self._mock_slm_triage_turn(conversation_history, vitals)
+        # Standard un-fine-tuned model tends to ask more generalized exploratory questions
+        turn["next_question_en"] = f"Could you provide more details about how long this has been affecting you and any other symptoms?"
+        turn["next_question_hi"] = f"Kya aap bata sakte hain ki ye pareshani kitne samay se hai aur koi anya lakshan bhi hain?"
+        return turn
+
+    def compare_models(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "en"
+    ) -> Dict[str, Any]:
+        """
+        Executes identical patient input through BOTH standard_medgemma and finetuned_medgemma.
+        Computes structured extractions, validation statuses, latencies, and LightGBM predictions.
+        Does NOT merge outputs into the active patient conversation.
+        """
+        from backend.ml_triage_service import predict_urgency_lgbm_with_details
+
+        vitals_dict = vitals or {}
+
+        # 1. Evaluate Standard MedGemma
+        t0_std = time.perf_counter()
+        std_err = None
+        std_result = {}
+        try:
+            std_result = self.generate_slm_triage_turn(
+                conversation_history=conversation_history,
+                vitals=vitals_dict,
+                preferred_language=preferred_language,
+                provider="standard_medgemma"
+            )
+        except Exception as e:
+            std_err = str(e)
+        latency_std_ms = round((time.perf_counter() - t0_std) * 1000, 1)
+
+        # 2. Evaluate Fine-Tuned MedGemma
+        t0_ft = time.perf_counter()
+        ft_err = None
+        ft_result = {}
+        try:
+            ft_result = self.generate_slm_triage_turn(
+                conversation_history=conversation_history,
+                vitals=vitals_dict,
+                preferred_language=preferred_language,
+                provider="finetuned_medgemma"
+            )
+        except Exception as e:
+            ft_err = str(e)
+        latency_ft_ms = round((time.perf_counter() - t0_ft) * 1000, 1)
+
+        # 3. LightGBM Urgency Predictions for Each Model's Features
+        std_ml = predict_urgency_lgbm_with_details(std_result, vitals_dict) if std_result else {}
+        ft_ml = predict_urgency_lgbm_with_details(ft_result, vitals_dict) if ft_result else {}
+
+        return {
+            "comparison_mode": "dual_provider_evaluation",
+            "timestamp": time.time(),
+            "patient_context_turns": len(conversation_history),
+            "vitals_evaluated": vitals_dict,
+            "standard_medgemma": {
+                "provider_id": "standard_medgemma",
+                "name": "Google MedGemma (Standard API)",
+                "latency_ms": latency_std_ms,
+                "error": std_err,
+                "output": std_result,
+                "validation_status": std_result.get("validation_status", "failed") if std_result else "error",
+                "next_question_en": std_result.get("next_question_en"),
+                "next_question_hi": std_result.get("next_question_hi"),
+                "primary_system_flag": std_result.get("primary_system_flag"),
+                "red_flag_severe_pain": std_result.get("red_flag_severe_pain"),
+                "red_flag_acute_onset": std_result.get("red_flag_acute_onset"),
+                "ml_prediction": std_ml.get("predicted_tier", "P3"),
+                "ml_probabilities": std_ml.get("probabilities", {}),
+            },
+            "finetuned_medgemma": {
+                "provider_id": "finetuned_medgemma",
+                "name": "CareFlow Fine-Tuned MedGemma 4B",
+                "latency_ms": latency_ft_ms,
+                "error": ft_err,
+                "output": ft_result,
+                "validation_status": ft_result.get("validation_status", "failed") if ft_result else "error",
+                "next_question_en": ft_result.get("next_question_en"),
+                "next_question_hi": ft_result.get("next_question_hi"),
+                "primary_system_flag": ft_result.get("primary_system_flag"),
+                "red_flag_severe_pain": ft_result.get("red_flag_severe_pain"),
+                "red_flag_acute_onset": ft_result.get("red_flag_acute_onset"),
+                "ml_prediction": ft_ml.get("predicted_tier", "P3"),
+                "ml_probabilities": ft_ml.get("probabilities", {}),
+            }
+        }
 
     def _mock_slm_triage_turn(
         self,

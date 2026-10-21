@@ -21,8 +21,15 @@ class CareFlowAPIClient:
         except Exception as e:
             return {"status": "offline", "error": str(e)}
 
-    def create_case(self, preferred_language: str = "English", chief_complaint: Optional[str] = None) -> Dict[str, Any]:
+    def create_case(
+        self,
+        preferred_language: str = "English",
+        chief_complaint: Optional[str] = None,
+        selected_model_provider: Optional[str] = None
+    ) -> Dict[str, Any]:
         payload = {"preferred_language": preferred_language, "chief_complaint": chief_complaint}
+        if selected_model_provider:
+            payload["selected_model_provider"] = selected_model_provider
         resp = requests.post(f"{self.base_url}/cases", json=payload, timeout=10)
         resp.raise_for_status()
         return resp.json()
@@ -168,6 +175,35 @@ class CareFlowAPIClient:
     def upload_document(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
         resp = requests.post(f"{self.base_url}/cases/{case_id}/upload-document", files=files, timeout=40)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_model_providers(self) -> Dict[str, Any]:
+        """Fetches availability status of Standard MedGemma vs Fine-Tuned MedGemma."""
+        resp = requests.get(f"{self.base_url}/model-providers", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_case_model_provider(self, case_id: str, provider: str) -> Dict[str, Any]:
+        """Switches active MedGemma provider for the given case."""
+        payload = {"provider": provider}
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/model-provider", json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def compare_models(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "en"
+    ) -> Dict[str, Any]:
+        """Runs identical patient input through both standard and fine-tuned MedGemma side-by-side."""
+        payload = {
+            "conversation_history": conversation_history,
+            "vitals": vitals or {},
+            "preferred_language": preferred_language
+        }
+        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=45)
         resp.raise_for_status()
         return resp.json()
 

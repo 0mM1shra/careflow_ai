@@ -298,6 +298,8 @@ UI_TEXT = {
 # Initialize Session State
 if "selected_lang" not in st.session_state:
     st.session_state.selected_lang = "🌐 Auto-Detect Language (स्वचालित भाषा पहचान)"
+if "selected_model_provider" not in st.session_state:
+    st.session_state.selected_model_provider = "finetuned_medgemma"
 if "case_id" not in st.session_state:
     st.session_state.case_id = None
 if "intake_step" not in st.session_state:
@@ -306,6 +308,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_question" not in st.session_state:
     st.session_state.current_question = None
+if "current_question_en" not in st.session_state:
+    st.session_state.current_question_en = None
+if "current_question_hi" not in st.session_state:
+    st.session_state.current_question_hi = None
 if "is_emergency" not in st.session_state:
     st.session_state.is_emergency = False
 if "turn_count" not in st.session_state:
@@ -321,7 +327,7 @@ if "pending_voice_start" not in st.session_state:
 if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
-# Language selector bar in sidebar / top
+# Sidebar Controls: Language and Clinical SLM Engine
 lang_options = ["🌐 Auto-Detect Language (स्वचालित भाषा पहचान)", "🇬🇧 English", "🇮🇳 हिन्दी (Hindi)"]
 with st.sidebar:
     st.markdown("### 🌐 Language / भाषा")
@@ -338,12 +344,65 @@ with st.sidebar:
         st.session_state.selected_lang = chosen_lang
         # Dynamic full-screen translation: translate current question & conversation history
         new_target = "Hindi" if "हिन्दी" in chosen_lang else "English"
-        if st.session_state.current_question:
+        if new_target == "Hindi" and st.session_state.get("current_question_hi"):
+            st.session_state.current_question = st.session_state["current_question_hi"]
+        elif new_target == "English" and st.session_state.get("current_question_en"):
+            st.session_state.current_question = st.session_state["current_question_en"]
+        elif st.session_state.current_question:
             st.session_state.current_question = translate_question_text(st.session_state.current_question, new_target)
+
         for m in st.session_state.messages:
             if m.get("role") == "assistant":
-                m["content"] = translate_question_text(m.get("content", ""), new_target)
+                if new_target == "Hindi" and m.get("content_hi"):
+                    m["content"] = m["content_hi"]
+                elif new_target == "English" and m.get("content_en"):
+                    m["content"] = m["content_en"]
+                else:
+                    m["content"] = translate_question_text(m.get("content", ""), new_target)
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🧠 Clinical SLM Engine")
+    try:
+        prov_info = api_client.get_model_providers()
+    except Exception:
+        prov_info = {
+            "finetuned_medgemma": {"status": "ready", "runtime": "ollama"},
+            "standard_medgemma": {"status": "ready", "runtime": "hosted_api"}
+        }
+
+    provider_choices = [
+        "Mode B: Fine-Tuned MedGemma (Local Ollama / LoRA)",
+        "Mode A: Standard MedGemma (Hosted / Fallback)"
+    ]
+    cur_p = st.session_state.get("selected_model_provider", "finetuned_medgemma")
+    p_idx = 0 if cur_p == "finetuned_medgemma" else 1
+
+    selected_choice = st.radio(
+        "Active Reasoning Model:",
+        options=provider_choices,
+        index=p_idx,
+        key="slm_provider_radio",
+        help="Select between local fine-tuned MedGemma SLM (Ollama GPU) or standard MedGemma endpoint."
+    )
+    chosen_key = "finetuned_medgemma" if "Fine-Tuned" in selected_choice else "standard_medgemma"
+    if chosen_key != st.session_state.selected_model_provider:
+        st.session_state.selected_model_provider = chosen_key
+        if st.session_state.case_id:
+            try:
+                api_client.set_case_model_provider(st.session_state.case_id, chosen_key)
+            except Exception as e:
+                st.sidebar.caption(f"Provider sync: {e}")
+        st.rerun()
+
+    # Provider health badge
+    p_meta = prov_info.get(chosen_key, {})
+    p_status = p_meta.get("status", "unknown")
+    p_rt = p_meta.get("runtime", "")
+    if p_status == "ready":
+        st.caption(f"🟢 **Live:** `{chosen_key}` via `{p_rt}`")
+    else:
+        st.caption(f"🟡 **Status:** `{p_status}` via `{p_rt}`")
 
 # Determine active UI dictionary and target language
 if "हिन्दी" in st.session_state.selected_lang:
@@ -433,7 +492,8 @@ if st.session_state.intake_step == "start":
                             # 1. Create case in backend
                             new_case = api_client.create_case(
                                 preferred_language=backend_lang,
-                                chief_complaint=edited_start_voice.strip()
+                                chief_complaint=edited_start_voice.strip(),
+                                selected_model_provider=st.session_state.selected_model_provider
                             )
                             case_id = new_case["id"]
                             st.session_state.case_id = case_id
@@ -470,7 +530,14 @@ if st.session_state.intake_step == "start":
 
                             if q_res.get("next_question"):
                                 st.session_state.current_question = q_res["next_question"]
-                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": q_res["next_question"],
+                                    "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                    "content_hi": q_res.get("next_question_hi")
+                                })
                                 st.session_state.intake_step = "chatting"
                             else:
                                 st.session_state.intake_step = "review_edit"
@@ -558,7 +625,8 @@ if st.session_state.intake_step == "start":
                         initial_complaint = chief_complaint.strip() if chief_complaint.strip() else "Medical document attached for intake assessment"
                         new_case = api_client.create_case(
                             preferred_language=backend_lang,
-                            chief_complaint=initial_complaint
+                            chief_complaint=initial_complaint,
+                            selected_model_provider=st.session_state.selected_model_provider
                         )
                         case_id = new_case["id"]
                         st.session_state.case_id = case_id
@@ -605,7 +673,14 @@ if st.session_state.intake_step == "start":
 
                         if q_res.get("next_question"):
                             st.session_state.current_question = q_res["next_question"]
-                            st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                            st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                            st.session_state.current_question_hi = q_res.get("next_question_hi")
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": q_res["next_question"],
+                                "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                "content_hi": q_res.get("next_question_hi")
+                            })
                             st.session_state.intake_step = "chatting"
                         else:
                             st.session_state.intake_step = "review_edit"
@@ -640,12 +715,19 @@ elif st.session_state.intake_step == "chatting":
             sub_html = f'<div style="font-size:12px; opacity:0.8; margin-top:4px; font-style:italic;">{sub_tr}</div>' if sub_tr else ""
             st.markdown(f'<div class="chat-bubble-patient">{badge}<strong>{t["you_label"]}:</strong> {p_text}{sub_html}</div>', unsafe_allow_html=True)
         else:
-            disp_asst = translate_question_text(msg["content"], current_target_lang)
+            if current_target_lang == "Hindi":
+                disp_asst = msg.get("content_hi") or translate_question_text(msg.get("content_en") or msg.get("content", ""), "Hindi")
+            else:
+                disp_asst = msg.get("content_en") or translate_question_text(msg.get("content", ""), "English")
             st.markdown(f'<div class="chat-bubble-assistant"><strong>{t["assistant_label"]}:</strong> {disp_asst}</div>', unsafe_allow_html=True)
 
     # Current Question Card (Dynamically translated to selected language)
-    current_q_raw = st.session_state.current_question or ("Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?")
-    current_q = translate_question_text(current_q_raw, current_target_lang)
+    if current_target_lang == "Hindi":
+        current_q = st.session_state.get("current_question_hi") or translate_question_text(st.session_state.get("current_question_en") or st.session_state.current_question or "", "Hindi")
+    else:
+        current_q = st.session_state.get("current_question_en") or st.session_state.current_question or translate_question_text(st.session_state.get("current_question_hi") or "", "English")
+    if not current_q:
+        current_q = "Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?"
     st.markdown(f'<div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">'
                 f'<strong>{t["q_label"]}</strong><br/><span style="font-size: 16px;">{current_q}</span></div>', unsafe_allow_html=True)
 
@@ -719,7 +801,14 @@ elif st.session_state.intake_step == "chatting":
                                 st.session_state.intake_step = "review_edit"
                             else:
                                 st.session_state.current_question = q_res["next_question"]
-                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": q_res["next_question"],
+                                    "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                    "content_hi": q_res.get("next_question_hi")
+                                })
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error submitting voice response: {e}")
@@ -785,7 +874,14 @@ elif st.session_state.intake_step == "chatting":
                         st.session_state.intake_step = "review_edit"
                     else:
                         st.session_state.current_question = q_res["next_question"]
-                        st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                        st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                        st.session_state.current_question_hi = q_res.get("next_question_hi")
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": q_res["next_question"],
+                            "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                            "content_hi": q_res.get("next_question_hi")
+                        })
 
                     st.rerun()
                 except Exception as e:
@@ -873,7 +969,14 @@ elif st.session_state.intake_step == "chatting":
                                     st.session_state.intake_step = "review_edit"
                                 else:
                                     st.session_state.current_question = q_res["next_question"]
-                                    st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                    st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                    st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "content": q_res["next_question"],
+                                        "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                        "content_hi": q_res.get("next_question_hi")
+                                    })
 
                                 st.rerun()
                             except Exception as e:
@@ -964,6 +1067,8 @@ elif st.session_state.intake_step == "submitted":
         st.session_state.intake_step = "start"
         st.session_state.messages = []
         st.session_state.current_question = None
+        st.session_state.current_question_en = None
+        st.session_state.current_question_hi = None
         st.session_state.is_emergency = False
         st.session_state.turn_count = 0
         st.session_state.uploaded_docs = []

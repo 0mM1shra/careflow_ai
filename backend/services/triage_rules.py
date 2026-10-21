@@ -155,22 +155,96 @@ class DeterministicTriageEngine:
         ai_status: str = "ready"
     ) -> TriageResult:
         """
-        Main triage orchestrator method.
+        Main triage orchestrator method with deterministic safety gate.
         1. Executes deterministic if-else rules (ESI/MTS protocol).
         2. Calls trained LightGBM urgency classifier alongside the standard workflow.
-        3. Returns TriageResult containing both rule_based_triage and ml_model_triage.
+        3. Applies safety gate:
+           - Primary displayed result comes from LightGBM prediction after deterministic safety gate.
+           - Escalate when established emergency rule requires it, regardless of ML prediction.
+           - Never downgrade an emergency escalation because ML predicts lower acuity.
+           - If model is unavailable or inference fails, return explicit safe fallback status and escalation guidance.
         """
-        result = self._evaluate_rules(evidence_state, raw_messages, ai_status)
-        result.rule_based_triage = result.priority_category
+        # 1. Evaluate deterministic protocol rules
+        rule_result = self._evaluate_rules(evidence_state, raw_messages, ai_status)
+        rule_based_triage = rule_result.priority_category
+
+        # If system failure (ERR), return immediately
+        if rule_based_triage == "ERR":
+            rule_result.rule_based_triage = "ERR"
+            rule_result.final_triage = "ERR"
+            rule_result.ml_model_triage = None
+            rule_result.escalation_applied = True
+            rule_result.escalation_reason = "System failure safeguard triggered."
+            rule_result.model_status = "unavailable"
+            return rule_result
+
+        # 2. Call trained LightGBM urgency model
+        ml_model_triage = None
+        model_status = "available"
+        imputed_features = []
         try:
-            from backend.ml_triage_service import predict_urgency_lgbm, extract_vitals_from_dict_or_text
+            from backend.ml_triage_service import predict_urgency_lgbm_with_details, extract_vitals_from_dict_or_text
             all_text = " ".join(raw_messages)
             vitals = extract_vitals_from_dict_or_text(evidence_state.get("vitals"), all_text)
-            result.ml_model_triage = predict_urgency_lgbm(evidence_state, vitals)
+            ml_details = predict_urgency_lgbm_with_details(evidence_state, vitals)
+            ml_model_triage = ml_details.get("predicted_tier")
+            model_status = ml_details.get("model_status", "available")
+            imputed_features = ml_details.get("imputed_features", [])
         except Exception as e:
             logger.warning(f"LightGBM ML triage prediction failed: {e}")
-            result.ml_model_triage = "P3"
-        return result
+            model_status = "error"
+            ml_model_triage = None
+
+        # 3. Deterministic Safety Gate Decision Layer
+        final_triage = rule_based_triage
+        escalation_applied = False
+        escalation_reason = None
+
+        # Emergency check: Did deterministic rules trigger emergency escalation (P0 or P1)?
+        if rule_based_triage in ("P0", "P1"):
+            # Emergency rules MUST prevail. Never downgrade an emergency!
+            final_triage = rule_based_triage
+            if ml_model_triage and ml_model_triage in ("P2", "P3"):
+                escalation_applied = True
+                rule_name = rule_result.triggered_rules[0].rule_name if rule_result.triggered_rules else "Emergency Red Flag"
+                escalation_reason = f"Deterministic emergency override: Protocol rule '{rule_name}' mandates {rule_based_triage}. Lower-acuity ML prediction ({ml_model_triage}) suppressed for patient safety."
+            elif ml_model_triage == "P0" and rule_based_triage == "P1":
+                final_triage = "P0"
+                escalation_applied = True
+                escalation_reason = "Escalated to P0 (Resuscitation) based on multi-system ML physiological urgency prediction."
+            else:
+                escalation_applied = False
+                escalation_reason = f"Emergency tier {rule_based_triage} verified by clinical protocol."
+
+        # Non-emergency check (rule_based_triage in P2, P3):
+        else:
+            if model_status == "available" and ml_model_triage:
+                # Primary displayed result comes from learned LightGBM classifier
+                final_triage = ml_model_triage
+                if ml_model_triage in ("P0", "P1"):
+                    escalation_applied = True
+                    escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
+                elif ml_model_triage != rule_based_triage:
+                    escalation_applied = True
+                    escalation_reason = f"ML model triage ({ml_model_triage}) calibrated from clinical training distribution."
+                else:
+                    escalation_applied = False
+                    escalation_reason = f"Concordant tier {final_triage} between ML model and clinical protocol."
+            else:
+                # Model is unavailable, unreliable, or failed: return explicit safe fallback status
+                final_triage = rule_based_triage
+                escalation_applied = True
+                escalation_reason = "Model unavailable fallback: Assigned via deterministic clinical protocol due to ML classifier unavailability."
+
+        rule_result.priority_category = rule_based_triage
+        rule_result.final_triage = final_triage
+        rule_result.rule_based_triage = rule_based_triage
+        rule_result.ml_model_triage = ml_model_triage
+        rule_result.escalation_applied = escalation_applied
+        rule_result.escalation_reason = escalation_reason
+        rule_result.model_status = model_status
+        rule_result.imputed_features = imputed_features
+        return rule_result
 
     def _evaluate_rules(
         self,

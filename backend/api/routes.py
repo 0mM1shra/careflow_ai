@@ -180,19 +180,25 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
 
 
 
+        init_final = getattr(initial_triage, "final_triage", None) or init_priority
+        init_rule = getattr(initial_triage, "rule_based_triage", None) or init_priority
+        init_escalated = getattr(initial_triage, "escalation_applied", False)
+        init_esc_reason = getattr(initial_triage, "escalation_reason", None)
+
+    prov = getattr(req, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
+
     new_case = Case(
-
         id=case_id,
-
         preferred_language=req.preferred_language,
-
         chief_complaint=req.chief_complaint,
-
         ai_status="pending",
-
         priority_category=init_priority,
-
+        final_triage=init_final if "init_final" in locals() else init_priority,
+        rule_based_triage=init_rule if "init_rule" in locals() else init_priority,
         ml_model_triage=init_ml_priority if "init_ml_priority" in locals() else "P3",
+        escalation_applied=init_escalated if "init_escalated" in locals() else False,
+        escalation_reason=init_esc_reason if "init_esc_reason" in locals() else None,
+        selected_model_provider=prov,
 
         priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
 
@@ -340,9 +346,15 @@ def list_cases(
 
             "priority_category": c.priority_category,
 
-            "rule_based_triage": c.priority_category,
+            "final_triage": getattr(c, "final_triage", None) or c.priority_category,
+
+            "rule_based_triage": getattr(c, "rule_based_triage", None) or c.priority_category,
 
             "ml_model_triage": getattr(c, "ml_model_triage", None) or "P3",
+
+            "escalation_applied": getattr(c, "escalation_applied", False),
+
+            "escalation_reason": getattr(c, "escalation_reason", None),
 
             "review_status": c.review_status,
 
@@ -787,6 +799,14 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
 
+    case.rule_based_triage = getattr(triage_res, "rule_based_triage", None) or case.priority_category
+
+    case.final_triage = getattr(triage_res, "final_triage", None) or case.priority_category
+
+    case.escalation_applied = getattr(triage_res, "escalation_applied", False)
+
+    case.escalation_reason = getattr(triage_res, "escalation_reason", None)
+
     case.ml_model_triage = triage_res.ml_model_triage or "P3"
 
     case.updated_at = datetime.utcnow()
@@ -1112,6 +1132,7 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
 
     # Generate question with anti-repetition tracking
 
+    active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
     result = adaptive_questioning_service.generate_next_question(
 
         patient_messages=patient_msgs,
@@ -1124,6 +1145,8 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
 
         preferred_language=case.preferred_language or "English"
 
+    ,
+        provider=active_prov
     )
 
 
@@ -1538,6 +1561,8 @@ def override_priority(case_id: str, req: PriorityOverrideRequest, db: Session = 
 
     case.priority_category = req.new_priority  # Update active queue priority
 
+    case.final_triage = req.new_priority
+
     case.updated_at = datetime.utcnow()
 
 
@@ -1791,3 +1816,42 @@ def run_live_ai_pipeline(req: LivePipelineRequest):
         "clinical_explanation": explanation
     }
 
+
+
+# -------------------------------------------------------------
+# Model Provider Selection & Model Comparison Endpoints
+# -------------------------------------------------------------
+
+class SetModelProviderRequest(BaseModel):
+    provider: str = Field(..., description="'standard_medgemma' or 'finetuned_medgemma'")
+
+class ModelComparisonRequest(BaseModel):
+    conversation_history: List[str] = Field(default_factory=list)
+    vitals: Optional[Dict[str, Any]] = None
+    preferred_language: str = "en"
+
+@router.get("/model-providers")
+def get_model_providers_endpoint():
+    """Returns readiness status and runtime info for both MedGemma providers."""
+    return medgemma_service.get_provider_status()
+
+@router.post("/cases/{case_id}/model-provider")
+def set_case_model_provider(case_id: str, req: SetModelProviderRequest, db: Session = Depends(get_db)):
+    """Switches the active MedGemma provider for this specific case."""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+    if req.provider not in ("standard_medgemma", "finetuned_medgemma"):
+        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'standard_medgemma' or 'finetuned_medgemma'.")
+    case.selected_model_provider = req.provider
+    db.commit()
+    return {"status": "success", "case_id": case_id, "selected_model_provider": req.provider}
+
+@router.post("/model-comparison")
+def compare_models_endpoint(req: ModelComparisonRequest):
+    """Runs identical patient input through both standard_medgemma and finetuned_medgemma side-by-side."""
+    return medgemma_service.compare_models(
+        conversation_history=req.conversation_history,
+        vitals=req.vitals or {},
+        preferred_language=req.preferred_language
+    )

@@ -216,15 +216,18 @@ with col_queue:
     else:
         for c in filtered_cases:
             case_id = c["id"]
-            priority = c["priority_category"]
-            p_badge = render_priority_badge(priority)
+            final_prio = c.get("final_triage") or c.get("priority_category", "P3")
+            rule_prio = c.get("rule_based_triage", final_prio)
+            ml_prio = c.get("ml_model_triage", "P3")
+            p_badge = render_priority_badge(final_prio)
             chief = c["chief_complaint"] or "Chief complaint not provided"
             wait_min = c.get("waiting_minutes", 0.0)
             status = c["review_status"].upper()
             
+            esc_flag = "🚨 Escalated" if c.get("escalation_applied") else ""
             missing_flag = "⚠️ Missing Info" if c["has_missing_info"] else ""
-            conflict_flag = "⚡ Conflict/Uncertainty" if c["has_uncertainty_or_conflict"] else ""
-            flags = " • ".join([f for f in [missing_flag, conflict_flag] if f])
+            conflict_flag = "⚡ Conflict" if c["has_uncertainty_or_conflict"] else ""
+            flags = " • ".join([f for f in [esc_flag, missing_flag, conflict_flag] if f])
 
             is_selected = (st.session_state.selected_case_id == case_id)
             box_style = "border: 2px solid #0284C7; background: #F0F9FF;" if is_selected else "background: #FFFFFF;"
@@ -235,7 +238,8 @@ with col_queue:
                     <strong>{case_id}</strong>
                     <div style="display: flex; gap: 6px; align-items: center;">
                         <span>{p_badge}</span>
-                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #EEF2F6; color: #334155; font-weight: 600;">ML: {c.get('ml_model_triage', 'P3')}</span>
+                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #EEF2F6; color: #334155; font-weight: 600;">ML: {ml_prio}</span>
+                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #F8FAFC; color: #64748B; font-weight: 600;">Rule: {rule_prio}</span>
                     </div>
                 </div>
                 <div style="font-size: 14px; color: #1E293B; margin-bottom: 4px;">{chief[:80]}</div>
@@ -269,38 +273,62 @@ with col_detail:
 
             # Top Status Bar
             c_prio = case_data.get("priority_category", "P3")
+            final_prio = case_data.get("final_triage") or c_prio
             rule_prio = case_data.get("rule_based_triage", c_prio)
             ml_prio = case_data.get("ml_model_triage", "P3")
+            escalation_applied = case_data.get("escalation_applied", False)
+            escalation_reason = case_data.get("escalation_reason")
+            prov_name = case_data.get("selected_model_provider", "finetuned_medgemma")
             rev_prio = case_data.get("reviewer_priority")
             review_st = case_data.get("review_status", "pending")
             ai_st = case_data.get("ai_status", "pending")
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
+            ml_details = case_data.get("ml_details") or {}
+            model_status = ml_details.get("model_status", "available")
+            imputed_feats = ml_details.get("imputed_features") or []
 
             st.markdown(f"""
-            <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; padding: 12px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px;">
-                <div>
-                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">🛡️ Rule-Based Triage (ESI/MTS Guardrail)</span>
-                    {render_priority_badge(rule_prio)}
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; padding: 14px 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px;">
+                <div style="flex: 1; min-width: 180px;">
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #1E293B; display: block; margin-bottom: 4px;">🎯 Final Guarded Decision</span>
+                    {render_priority_badge(final_prio)}
                 </div>
                 <div>
-                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ ML Model Triage (LightGBM)</span>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ Learned ML Urgency (LightGBM)</span>
                     {render_priority_badge(ml_prio)}
                 </div>
-                <div style="margin-left: auto;">
-                    <span style="font-size: 13px; color: #475569;">
-                        Protocol: <code>{rule_ver}</code> | Engines: <code>MedGemma + LightGBM ({ai_st})</code>
+                <div>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">🛡️ Deterministic Safety Baseline</span>
+                    {render_priority_badge(rule_prio)}
+                </div>
+                <div style="margin-left: auto; text-align: right;">
+                    <span style="font-size: 12px; color: #475569; display: block;">
+                        SLM Engine: <strong><code>{prov_name}</code></strong>
+                    </span>
+                    <span style="font-size: 12px; color: #64748B; display: block;">
+                        Model Status: <strong><code>{model_status}</code></strong> | Protocol: <code>{rule_ver}</code>
                     </span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            if rule_prio != ml_prio:
-                st.warning(f"⚠️ **Dual-Signal Triage Divergence**: Rule-based safety guardrail classified this case as **{rule_prio}**, whereas the LightGBM classifier predicted **{ml_prio}**. Clinician review advised.")
+            if escalation_applied:
+                st.error(f"🚨 **Deterministic Safety Gate Escalation**: Primary triage is escalated to **{final_prio}** because: *{escalation_reason}*. Emergency protocols strictly override lower-acuity ML classifications.")
+            elif rule_prio != ml_prio:
+                st.warning(f"⚠️ **Dual-Signal Triage Divergence**: Guarded Final: **{final_prio}** | LightGBM Predicted: **{ml_prio}** | Rule Baseline: **{rule_prio}**. Clinician review advised.")
             else:
-                st.success(f"✅ **Dual-Signal Concordance**: Both the Rule-Based engine and the LightGBM urgency classifier agree on **{rule_prio}**.")
+                st.success(f"✅ **Dual-Signal Concordance**: Both clinical safety gate and LightGBM model agree on **{final_prio}**.")
 
-            if rev_prio and rev_prio != c_prio:
-                st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Original Algorithmic Priority: **{c_prio}**)")
+            if imputed_feats:
+                imputed_str = ", ".join([f"`{f}`" for f in imputed_feats])
+                st.markdown(f"""
+                <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-left: 4px solid #F59E0B; padding: 10px 14px; border-radius: 6px; color: #92400E; font-size: 12.5px; margin-bottom: 14px;">
+                    <strong>ℹ️ Imputed Clinical Vitals Telemetry:</strong> Continuous features {imputed_str} were not found in patient messages or reports. Standardized population medians were populated for LightGBM inference and tracked as imputed.
+                </div>
+                """, unsafe_allow_html=True)
+
+            if rev_prio and rev_prio != final_prio:
+                st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Algorithmic Guarded Priority: **{final_prio}**)")
 
             # Multi-Dimensional Clinical AI Reasoning & Explainability Card
             explanation = case_data.get("clinical_explanation")
@@ -399,6 +427,35 @@ with col_detail:
                     else:
                         for m in ocr_msgs:
                             st.text_area(f"Document Message OCR:", value=m.get("content", ""), height=110, disabled=True, key=f"msg_ocr_{m.get('id')}")
+
+                    # Structured Medical Facts Extraction
+                    struct_facts = evidence_st.get("structured_medical_facts", [])
+                    if struct_facts:
+                        st.markdown("---")
+                        st.markdown("#### 🧪 Structured Medical Facts & Clinical Values Extracted")
+                        st.caption("Standardized measurements, lab reference ranges, and uncertainty audit flags:")
+                        for sf in struct_facts:
+                            meas = sf.get("measurement", "Measurement").replace("_", " ").title()
+                            val = sf.get("value")
+                            unit = sf.get("unit", "")
+                            ref = sf.get("reference_range", "N/A")
+                            u_flag = sf.get("uncertainty_flag", False)
+                            u_reason = sf.get("uncertainty_reason", "")
+                            date_str = sf.get("date", "")
+                            
+                            flag_html = f'<span style="background:#FEE2E2; color:#991B1B; font-size:11px; font-weight:700; padding:2px 6px; border-radius:4px; border:1px solid #FCA5A5;">⚠️ Uncertain ({u_reason})</span>' if u_flag else '<span style="background:#ECFDF5; color:#047857; font-size:11px; font-weight:700; padding:2px 6px; border-radius:4px; border:1px solid #A7F3D0;">✅ Verified</span>'
+                            
+                            st.markdown(f"""
+                            <div style="border:1px solid #E2E8F0; border-radius:6px; padding:8px 12px; margin-bottom:6px; background:#FFFFFF;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <strong>{meas}:</strong> <span style="font-weight:600; color:#0F172A;">{val} {unit}</span>
+                                    <div>{flag_html}</div>
+                                </div>
+                                <div style="font-size:12px; color:#64748B; margin-top:2px;">
+                                    Reference Range: <code>{ref}</code> {f'| Document Date: {date_str}' if date_str else ''}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
             # Warnings / Missing Info / Uncertainties
             missing = case_data.get("missing_information", [])

@@ -50,10 +50,32 @@ class ClinicalExtractionOutput(BaseModel):
 
 class FollowUpQuestionOutput(BaseModel):
     next_question: Optional[str] = Field(None, description="The single next clinically relevant question to ask the patient")
+    next_question_en: Optional[str] = Field(None, description="English question text")
+    next_question_hi: Optional[str] = Field(None, description="Hindi/Hinglish question text")
     reason_for_question: str = Field(..., description="Clinical justification for asking this particular question")
     target_field: str = Field(..., description="The clinical field or missing piece of information targeted")
     is_terminal: bool = Field(False, description="Whether questioning should conclude")
     slm_extraction: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Fine-tuned MedGemma SLM features and bilingual questions")
+    selected_provider: Optional[str] = Field("finetuned_medgemma", description="Provider used for generation")
+    validation_status: Optional[str] = Field("valid", description="Schema validation status: valid, repaired, fallback")
+
+
+class SLMTriageTurn(BaseModel):
+    primary_system_flag: Literal[
+        "sys_cardiopulmonary",
+        "sys_neurological",
+        "sys_gastrointestinal",
+        "sys_urogenital",
+        "sys_musculoskeletal",
+        "sys_dermatological",
+        "sys_systemic",
+        "sys_eent"
+    ]
+    red_flag_severe_pain: bool
+    red_flag_acute_onset: bool
+    target_triage_boundary: Literal["P0", "P1", "P2", "P3"]
+    next_question_en: str = Field(..., min_length=5, description="English follow-up question")
+    next_question_hi: str = Field(..., min_length=5, description="Hindi follow-up question")
 
 
 class ClinicalSummaryOutput(BaseModel):
@@ -98,6 +120,11 @@ class TriageResult(BaseModel):
     triage_rule_version: str
     rule_based_triage: Optional[str] = None
     ml_model_triage: Optional[str] = None
+    final_triage: Optional[str] = None
+    escalation_applied: bool = False
+    escalation_reason: Optional[str] = None
+    model_status: Optional[str] = "available"
+    imputed_features: List[str] = Field(default_factory=list)
 
 
 # -------------------------------------------------------------
@@ -107,6 +134,7 @@ class TriageResult(BaseModel):
 class CaseCreateRequest(BaseModel):
     preferred_language: str = "English"
     chief_complaint: Optional[str] = None
+    selected_model_provider: Optional[str] = "finetuned_medgemma"
 
 
 class MessageCreateRequest(BaseModel):
