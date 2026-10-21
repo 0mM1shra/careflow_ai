@@ -233,7 +233,10 @@ with col_queue:
             <div style="border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; margin-bottom: 10px; {box_style}">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                     <strong>{case_id}</strong>
-                    <span>{p_badge}</span>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <span>{p_badge}</span>
+                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #EEF2F6; color: #334155; font-weight: 600;">ML: {c.get('ml_model_triage', 'P3')}</span>
+                    </div>
                 </div>
                 <div style="font-size: 14px; color: #1E293B; margin-bottom: 4px;">{chief[:80]}</div>
                 <div style="font-size: 12px; color: #64748B; display: flex; justify-content: space-between;">
@@ -266,19 +269,35 @@ with col_detail:
 
             # Top Status Bar
             c_prio = case_data.get("priority_category", "P3")
+            rule_prio = case_data.get("rule_based_triage", c_prio)
+            ml_prio = case_data.get("ml_model_triage", "P3")
             rev_prio = case_data.get("reviewer_priority")
             review_st = case_data.get("review_status", "pending")
             ai_st = case_data.get("ai_status", "pending")
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
 
             st.markdown(f"""
-            <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 16px;">
-                {render_priority_badge(c_prio)}
-                <span style="font-size: 13px; color: #475569;">
-                    Protocol: <code>{rule_ver}</code> | AI Engine: <code>MedGemma ({ai_st})</code>
-                </span>
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; padding: 12px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px;">
+                <div>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">🛡️ Rule-Based Triage (ESI/MTS Guardrail)</span>
+                    {render_priority_badge(rule_prio)}
+                </div>
+                <div>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ ML Model Triage (LightGBM)</span>
+                    {render_priority_badge(ml_prio)}
+                </div>
+                <div style="margin-left: auto;">
+                    <span style="font-size: 13px; color: #475569;">
+                        Protocol: <code>{rule_ver}</code> | Engines: <code>MedGemma + LightGBM ({ai_st})</code>
+                    </span>
+                </div>
             </div>
             """, unsafe_allow_html=True)
+
+            if rule_prio != ml_prio:
+                st.warning(f"⚠️ **Dual-Signal Triage Divergence**: Rule-based safety guardrail classified this case as **{rule_prio}**, whereas the LightGBM classifier predicted **{ml_prio}**. Clinician review advised.")
+            else:
+                st.success(f"✅ **Dual-Signal Concordance**: Both the Rule-Based engine and the LightGBM urgency classifier agree on **{rule_prio}**.")
 
             if rev_prio and rev_prio != c_prio:
                 st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Original Algorithmic Priority: **{c_prio}**)")

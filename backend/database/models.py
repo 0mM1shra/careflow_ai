@@ -28,6 +28,9 @@ class Case(Base):
     missing_information_json = Column(Text, default="[]", nullable=False)
     uncertainties_json = Column(Text, default="[]", nullable=False)
     triage_rule_version = Column(String(32), default="v1.0.0-prototype", nullable=False)
+
+    # ML Urgency Classifier Signal (LightGBM): 'P0', 'P1', 'P2', 'P3'
+    ml_model_triage = Column(String(16), default="P3", nullable=True)
     
     # Reviewer workflow: 'pending', 'reviewed', 'approved', 'reopened'
     review_status = Column(String(32), default="pending", nullable=False, index=True)
@@ -52,6 +55,8 @@ class Case(Base):
             "ai_summary": json.loads(self.ai_summary_json or "{}"),
             "ai_status": self.ai_status,
             "priority_category": self.priority_category,
+            "rule_based_triage": self.priority_category,
+            "ml_model_triage": getattr(self, "ml_model_triage", None) or "P3",
             "priority_reasons": json.loads(self.priority_reasons_json or "[]"),
             "missing_information": json.loads(self.missing_information_json or "[]"),
             "uncertainties": json.loads(self.uncertainties_json or "[]"),

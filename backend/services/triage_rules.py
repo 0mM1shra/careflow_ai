@@ -155,6 +155,30 @@ class DeterministicTriageEngine:
         ai_status: str = "ready"
     ) -> TriageResult:
         """
+        Main triage orchestrator method.
+        1. Executes deterministic if-else rules (ESI/MTS protocol).
+        2. Calls trained LightGBM urgency classifier alongside the standard workflow.
+        3. Returns TriageResult containing both rule_based_triage and ml_model_triage.
+        """
+        result = self._evaluate_rules(evidence_state, raw_messages, ai_status)
+        result.rule_based_triage = result.priority_category
+        try:
+            from backend.ml_triage_service import predict_urgency_lgbm, extract_vitals_from_dict_or_text
+            all_text = " ".join(raw_messages)
+            vitals = extract_vitals_from_dict_or_text(evidence_state.get("vitals"), all_text)
+            result.ml_model_triage = predict_urgency_lgbm(evidence_state, vitals)
+        except Exception as e:
+            logger.warning(f"LightGBM ML triage prediction failed: {e}")
+            result.ml_model_triage = "P3"
+        return result
+
+    def _evaluate_rules(
+        self,
+        evidence_state: Dict[str, Any],
+        raw_messages: List[str],
+        ai_status: str = "ready"
+    ) -> TriageResult:
+        """
         Evaluates clinical evidence and generates a transparent, auditable TriageResult.
         Combines deterministic protocol safety checks with MedGemma model-reasoned urgency signals.
         """

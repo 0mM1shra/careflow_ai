@@ -95,6 +95,8 @@ class TriageResult(BaseModel):
     missing_information: List[str]
     uncertainties: List[str]
     triage_rule_version: str
+    rule_based_triage: Optional[str] = None
+    ml_model_triage: Optional[str] = None
 
 
 # -------------------------------------------------------------

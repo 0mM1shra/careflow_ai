@@ -39,6 +39,14 @@ def _migrate_sqlite_schema():
     """Applies lightweight schema migrations for existing SQLite databases."""
     try:
         with engine.begin() as conn:
+            # Check cases table
+            res_cases = conn.execute(text("PRAGMA table_info(cases)")).fetchall()
+            existing_case_cols = {row[1] for row in res_cases}
+            if existing_case_cols:
+                if "ml_model_triage" not in existing_case_cols:
+                    logger.info("Migrating cases table: adding ml_model_triage column")
+                    conn.execute(text("ALTER TABLE cases ADD COLUMN ml_model_triage VARCHAR(16) DEFAULT 'P3'"))
+
             # Check messages table
             res = conn.execute(text("PRAGMA table_info(messages)")).fetchall()
             existing_msg_cols = {row[1] for row in res}
