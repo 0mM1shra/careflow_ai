@@ -259,6 +259,22 @@ def extract_vitals_from_dict_or_text(
     return vitals
 
 
+def _parse_bool_flag(val: Any) -> int:
+    """Robustly casts booleans, numbers, and string representations into 0 or 1."""
+    if val is None:
+        return 0
+    if isinstance(val, bool):
+        return 1 if val else 0
+    if isinstance(val, (int, float)):
+        return 1 if val > 0 else 0
+    if isinstance(val, str):
+        v_clean = val.strip().lower()
+        if v_clean in ("true", "1", "yes", "y", "t", "acute", "severe", "positive"):
+            return 1
+        return 0
+    return 1 if bool(val) else 0
+
+
 def _map_slm_and_vitals_to_dataframe(
     slm_json_output: Optional[Union[Dict[str, Any], str]],
     lab_vitals_dict: Optional[Dict[str, Any]] = None
@@ -275,9 +291,17 @@ def _map_slm_and_vitals_to_dataframe(
         except Exception:
             slm_data = {"raw_text": slm_json_output}
     elif isinstance(slm_json_output, dict):
-        slm_data = slm_json_output
+        slm_data = dict(slm_json_output)
     elif slm_json_output is not None:
         slm_data = getattr(slm_json_output, "model_dump", lambda: {})() or {}
+
+    # If passed an entire evidence_state dict, unwrap nested slm_extraction and vitals
+    if isinstance(slm_data, dict):
+        if "slm_extraction" in slm_data and isinstance(slm_data["slm_extraction"], dict):
+            # Merge slm_extraction keys into slm_data for direct access
+            slm_data = {**slm_data["slm_extraction"], **slm_data}
+        if lab_vitals_dict is None and "vitals" in slm_data and isinstance(slm_data["vitals"], dict):
+            lab_vitals_dict = slm_data["vitals"]
 
     # Extract continuous vitals
     vitals = extract_vitals_from_dict_or_text(lab_vitals_dict)
@@ -303,9 +327,9 @@ def _map_slm_and_vitals_to_dataframe(
 
     # 1. Map Pain Severity (pain_severe)
     if "red_flag_severe_pain" in slm_data:
-        row["pain_severe"] = 1 if slm_data["red_flag_severe_pain"] else 0
+        row["pain_severe"] = _parse_bool_flag(slm_data["red_flag_severe_pain"])
     elif "pain_severe" in slm_data:
-        row["pain_severe"] = 1 if slm_data["pain_severe"] else 0
+        row["pain_severe"] = _parse_bool_flag(slm_data["pain_severe"])
     else:
         # Check MedGemma standard fields
         sev_str = str(slm_data.get("severity", "")).lower()
@@ -316,9 +340,9 @@ def _map_slm_and_vitals_to_dataframe(
 
     # 2. Map Acute Onset (onset_acute)
     if "red_flag_acute_onset" in slm_data:
-        row["onset_acute"] = 1 if slm_data["red_flag_acute_onset"] else 0
+        row["onset_acute"] = _parse_bool_flag(slm_data["red_flag_acute_onset"])
     elif "onset_acute" in slm_data:
-        row["onset_acute"] = 1 if slm_data["onset_acute"] else 0
+        row["onset_acute"] = _parse_bool_flag(slm_data["onset_acute"])
     else:
         onset_str = str(slm_data.get("onset_and_duration", "")).lower()
         if any(w in onset_str for w in ["sudden", "acute", "today", "hour", "minute", "kal se", "कल से", "achanak"]):
@@ -327,11 +351,35 @@ def _map_slm_and_vitals_to_dataframe(
             row["onset_acute"] = 1  # Default to conservative acute onset assumption
 
     # 3. Map System Flags (sys_*)
-    # Check direct primary_system_flag from SLM
+    # Check direct primary_system_flag from SLM with alias normalization
     primary_sys = str(slm_data.get("primary_system_flag", "")).strip().lower()
     if primary_sys:
         if not primary_sys.startswith("sys_"):
             primary_sys = f"sys_{primary_sys}"
+        
+        # Clinical system alias map
+        alias_map = {
+            "sys_cardio": "sys_cardiopulmonary",
+            "sys_cardiac": "sys_cardiopulmonary",
+            "sys_pulmonary": "sys_cardiopulmonary",
+            "sys_respiratory": "sys_cardiopulmonary",
+            "sys_neuro": "sys_neurological",
+            "sys_gi": "sys_gastrointestinal",
+            "sys_gastro": "sys_gastrointestinal",
+            "sys_abdominal": "sys_gastrointestinal",
+            "sys_uro": "sys_urogenital",
+            "sys_renal": "sys_urogenital",
+            "sys_urinary": "sys_urogenital",
+            "sys_msk": "sys_musculoskeletal",
+            "sys_ortho": "sys_musculoskeletal",
+            "sys_derm": "sys_dermatological",
+            "sys_skin": "sys_dermatological",
+            "sys_ent": "sys_eent",
+            "sys_eye": "sys_eent",
+            "sys_ear": "sys_eent",
+        }
+        primary_sys = alias_map.get(primary_sys, primary_sys)
+
         if primary_sys in row:
             row[primary_sys] = 1
 
