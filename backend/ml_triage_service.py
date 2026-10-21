@@ -2,15 +2,15 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 from pathlib import Path
 import pandas as pd
 import joblib
 
 logger = logging.getLogger("careflow.ml_triage")
 
-# Ordered features matching careflow_robust_ml.csv
-FEATURE_COLUMNS = [
+# Ordered features matching careflow_diverse_ml.csv (and careflow_robust_ml.csv)
+FEATURE_COLUMNS: List[str] = [
     "age",
     "heart_rate",
     "systolic_bp",
@@ -28,84 +28,136 @@ FEATURE_COLUMNS = [
     "sys_eent",
 ]
 
-# Population median fallbacks derived from careflow_robust_ml.csv
-DEFAULT_VITALS = {
+# Population median fallbacks derived from careflow_diverse_ml.csv
+DEFAULT_VITALS: Dict[str, Any] = {
     "age": 50,
-    "heart_rate": 88,
+    "heart_rate": 90,
     "systolic_bp": 125,
-    "spo2_pct": 96,
+    "spo2_pct": 95,
     "temp_f": 98.6,
 }
 
 # Integer class mapping to clinical urgency categories
-TARGET_PRIORITY_MAP = {
+TARGET_PRIORITY_MAP: Dict[int, str] = {
     0: "P0",
     1: "P1",
     2: "P2",
     3: "P3",
 }
 
-_MODEL_INSTANCE = None
+_MODEL_INSTANCE: Any = None
 _DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "lgbm_urgency_model.joblib"
-_DEFAULT_DATASET_PATH = Path(__file__).resolve().parent.parent / "careflow_robust_dataset" / "careflow_robust_ml.csv"
+
+# Prioritized search order for training datasets (prefers updated diverse dataset)
+CANDIDATE_DATASET_PATHS = [
+    Path(__file__).resolve().parent.parent / "careflow_final_dataset" / "careflow_diverse_ml.csv",
+    Path(__file__).resolve().parent.parent / "careflow_diverse_ml.csv",
+    Path(__file__).resolve().parent.parent / "careflow_robust_dataset" / "careflow_diverse_ml.csv",
+    Path(__file__).resolve().parent.parent / "careflow_robust_dataset" / "careflow_robust_ml.csv",
+]
 
 
-def train_lgbm_model(dataset_path: Optional[Union[str, Path]] = None, save_path: Optional[Union[str, Path]] = None) -> Any:
+def resolve_primary_dataset_path() -> Path:
+    """Returns the most up-to-date available tabular training dataset path."""
+    for path in CANDIDATE_DATASET_PATHS:
+        if path.exists():
+            return path
+    raise FileNotFoundError("No tabular triage dataset (careflow_diverse_ml.csv) found in candidate locations.")
+
+
+def train_lgbm_model(
+    dataset_path: Optional[Union[str, Path]] = None,
+    save_path: Optional[Union[str, Path]] = None,
+    class_weight: Union[str, Dict[int, float]] = "balanced"
+) -> Any:
     """
-    Trains a LightGBM classifier on the tabular dataset and saves the artifact.
+    Trains a multiclass LightGBM classifier on the tabular dataset using
+    cost-sensitive class weights for P0-P3 tiers and saves the model artifact.
     """
     import lightgbm as lgb
 
-    data_file = Path(dataset_path) if dataset_path else _DEFAULT_DATASET_PATH
+    data_file = Path(dataset_path) if dataset_path else resolve_primary_dataset_path()
     output_file = Path(save_path) if save_path else _DEFAULT_MODEL_PATH
 
     if not data_file.exists():
         raise FileNotFoundError(f"Training dataset not found at {data_file}")
 
-    logger.info(f"Training LightGBM urgency model from {data_file}...")
+    logger.info(f"Training cost-sensitive LightGBM urgency model from {data_file}...")
     df = pd.read_csv(data_file)
     X = df[FEATURE_COLUMNS]
     y = df["target_priority"]
 
+    # Cost-sensitive multiclass classifier:
+    # 'balanced' automatically adjusts weights inversely proportional to class frequencies,
+    # penalizing under-triage of rare/critical tiers (P0, P1, P3).
     clf = lgb.LGBMClassifier(
         n_estimators=100,
         learning_rate=0.05,
+        class_weight=class_weight,
         random_state=42,
         verbose=-1,
     )
     clf.fit(X, y)
 
+    # Attach training metadata
+    setattr(clf, "_dataset_source", str(data_file.name))
+    setattr(clf, "_dataset_mtime", data_file.stat().st_mtime)
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, output_file)
-    logger.info(f"LightGBM urgency model saved to {output_file}")
+    logger.info(f"LightGBM urgency model saved to {output_file} (source: {data_file.name})")
     return clf
+
+
+def is_model_out_of_date(model_path: Path, dataset_path: Path, loaded_model: Optional[Any] = None) -> bool:
+    """
+    Checks if the model artifact is missing or out of date relative to the dataset.
+    """
+    if not model_path.exists():
+        return True
+
+    try:
+        # Check file timestamp
+        if dataset_path.exists() and dataset_path.stat().st_mtime > model_path.stat().st_mtime:
+            return True
+
+        # Check metadata source if available
+        if loaded_model is not None:
+            source = getattr(loaded_model, "_dataset_source", "")
+            if source and source != dataset_path.name:
+                return True
+    except Exception as e:
+        logger.debug(f"Error checking model freshness: {e}")
+
+    return False
 
 
 def get_lgbm_model() -> Any:
     """
     Retrieves or loads the cached LightGBM model singleton.
-    Auto-trains from careflow_robust_ml.csv if the artifact is missing.
+    Auto-trains from careflow_diverse_ml.csv if the artifact is missing or out of date.
     """
     global _MODEL_INSTANCE
     if _MODEL_INSTANCE is not None:
         return _MODEL_INSTANCE
 
+    primary_dataset = resolve_primary_dataset_path()
+
     if _DEFAULT_MODEL_PATH.exists():
         try:
-            logger.info(f"Loading LightGBM model from {_DEFAULT_MODEL_PATH}")
-            _MODEL_INSTANCE = joblib.load(_DEFAULT_MODEL_PATH)
-            return _MODEL_INSTANCE
+            loaded = joblib.load(_DEFAULT_MODEL_PATH)
+            if not is_model_out_of_date(_DEFAULT_MODEL_PATH, primary_dataset, loaded):
+                logger.info(f"Loaded existing LightGBM model from {_DEFAULT_MODEL_PATH}")
+                _MODEL_INSTANCE = loaded
+                return _MODEL_INSTANCE
+            else:
+                logger.info("Existing LightGBM model is out of date relative to updated dataset. Re-training...")
         except Exception as e:
             logger.warning(f"Failed to load existing model ({e}); re-training...")
 
-    if _DEFAULT_DATASET_PATH.exists():
-        _MODEL_INSTANCE = train_lgbm_model(_DEFAULT_DATASET_PATH, _DEFAULT_MODEL_PATH)
-        return _MODEL_INSTANCE
-
-    raise RuntimeError(
-        f"Unable to load or train LightGBM model: neither {_DEFAULT_MODEL_PATH} "
-        f"nor {_DEFAULT_DATASET_PATH} was found."
-    )
+    # Auto-training fallback
+    _MODEL_INSTANCE = train_lgbm_model(primary_dataset, _DEFAULT_MODEL_PATH, class_weight="balanced")
+    return _MODEL_INSTANCE
 
 
 def extract_vitals_from_dict_or_text(
@@ -305,7 +357,7 @@ def _map_slm_and_vitals_to_dataframe(
         elif any(w in s_low for w in ["fever", "chills", "fatigue", "weakness", "infection", "बुखार"]):
             row["sys_systemic"] = 1
         else:
-            # Default to sys_cardiopulmonary for safety if completely undetermined
+            # Default to sys_systemic for safety if completely undetermined
             row["sys_systemic"] = 1
 
     return pd.DataFrame([row], columns=FEATURE_COLUMNS)
@@ -320,7 +372,7 @@ def predict_urgency_lgbm(
     
     1. Loads the trained LightGBM urgency model.
     2. Maps MedGemma / SLM JSON features and patient continuous vitals into the
-       15-feature Pandas DataFrame schema matching careflow_robust_ml.csv.
+       15-feature Pandas DataFrame schema matching careflow_diverse_ml.csv.
     3. Returns the predicted P0-P3 urgency tier (e.g. 'P0', 'P1', 'P2', 'P3').
     """
     try:

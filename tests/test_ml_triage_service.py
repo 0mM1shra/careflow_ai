@@ -70,7 +70,20 @@ def test_predict_urgency_lgbm_slm_format():
     vitals = {"age": 76, "heart_rate": 109, "systolic_bp": 104, "spo2_pct": 92, "temp_f": 97.0}
     prediction = predict_urgency_lgbm(slm_output, vitals)
     assert prediction in ["P0", "P1", "P2", "P3"]
-    assert prediction == "P1"  # matches row 0 of careflow_robust_ml.csv
+    assert prediction == "P1"
+
+
+def test_predict_urgency_lgbm_diverse_dataset_sample():
+    # CF_V2_0000 sample from careflow_diverse_slm.jsonl
+    slm_sample = {
+        "primary_system_flag": "sys_dermatological",
+        "red_flag_severe_pain": False,
+        "red_flag_acute_onset": True,
+        "target_triage_boundary": "P2"
+    }
+    vitals_sample = {"age": 36, "heart_rate": 98, "systolic_bp": 129, "spo2_pct": 96, "temp_f": 99.4}
+    pred = predict_urgency_lgbm(slm_sample, vitals_sample)
+    assert pred == "P2"
 
 
 def test_predict_urgency_lgbm_with_details():
