@@ -24,6 +24,8 @@ class Case(Base):
     
     # Priority triage: 'P0', 'P1', 'P2', 'P3', 'ERR'
     priority_category = Column(String(16), default="P3", nullable=False, index=True)
+    ml_model_triage = Column(String(16), default="P3", nullable=True)
+    ml_confidence = Column(Float, default=0.0, nullable=True)
     priority_reasons_json = Column(Text, default="[]", nullable=False)
     missing_information_json = Column(Text, default="[]", nullable=False)
     uncertainties_json = Column(Text, default="[]", nullable=False)
@@ -43,6 +45,8 @@ class Case(Base):
     audit_events = relationship("AuditEvent", back_populates="case", cascade="all, delete-orphan", order_by="AuditEvent.created_at")
 
     def to_dict(self):
+        ml_prio = getattr(self, "ml_model_triage", None) or self.priority_category
+        ml_conf = float(getattr(self, "ml_confidence", 0.0) or 0.0)
         return {
             "id": self.id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -53,6 +57,11 @@ class Case(Base):
             "ai_summary": json.loads(self.ai_summary_json or "{}"),
             "ai_status": self.ai_status,
             "priority_category": self.priority_category,
+            "rule_based_priority": self.priority_category,
+            "rule_based_triage": self.priority_category,
+            "ml_model_priority": ml_prio,
+            "ml_model_triage": ml_prio,
+            "ml_confidence": ml_conf,
             "priority_reasons": json.loads(self.priority_reasons_json or "[]"),
             "missing_information": json.loads(self.missing_information_json or "[]"),
             "uncertainties": json.loads(self.uncertainties_json or "[]"),

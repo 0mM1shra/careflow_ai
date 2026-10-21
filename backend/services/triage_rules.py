@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from backend.schemas.clinical import TriageResult, TriageTrigger
 from backend.config import settings
+from backend.ml_triage_service import predict_urgency_lgbm
 
 logger = logging.getLogger("careflow.triage")
 
@@ -152,7 +153,8 @@ class DeterministicTriageEngine:
         self,
         evidence_state: Dict[str, Any],
         raw_messages: List[str],
-        ai_status: str = "ready"
+        ai_status: str = "ready",
+        lab_vitals: Optional[Dict[str, Any]] = None
     ) -> TriageResult:
         """
         Evaluates clinical evidence and generates a transparent, auditable TriageResult.
@@ -161,12 +163,28 @@ class DeterministicTriageEngine:
         - Tier 2: Multidimensional Clinical Acuity Synthesis (pain severity, acute deterioration, autonomic signs, conflict/uncertainty)
         - Tier 3: Universal Protocol Safety Guardrail Floor (Manchester Triage / ESI life threats safety net)
         - Tier 4: System Fallback (safe default on AI service failure)
+        - ML Classifier: LightGBM Tabular Urgency Prediction alongside deterministic rules
         """
+        # Compute LightGBM ML urgency prediction alongside deterministic rules
+        ml_prediction = "P3"
+        ml_conf = 0.0
+        try:
+            res = predict_urgency_lgbm(evidence_state, lab_vitals)
+            ml_prediction = str(res)
+            ml_conf = float(res.get("ml_confidence", 0.0)) if isinstance(res, dict) else 0.0
+        except Exception as e:
+            logger.warning(f"Error computing LightGBM prediction in triage engine: {e}")
+
         # Tier 4: Check for AI / System Failure
         if ai_status == "failed":
             logger.warning("AI status is 'failed'. Triage defaulting to ERR.")
             return TriageResult(
                 priority_category="ERR",
+                rule_based_priority="ERR",
+                rule_based_triage="ERR",
+                ml_model_priority=ml_prediction,
+                ml_model_triage=ml_prediction,
+                ml_confidence=ml_conf,
                 priority_label="⚠️ Review Required — AI Unavailable",
                 reasons=["AI model service or schema validation failed. Manual clinician review mandatory."],
                 warning_signs=["System failure: AI-extracted evidence unavailable."],
@@ -243,6 +261,11 @@ class DeterministicTriageEngine:
             )
             return TriageResult(
                 priority_category="P0",
+                rule_based_priority="P0",
+                rule_based_triage="P0",
+                ml_model_priority=ml_prediction,
+                ml_model_triage=ml_prediction,
+                ml_confidence=ml_conf,
                 priority_label="🚨 P0: Emergency Escalation",
                 reasons=p0_reasons,
                 warning_signs=p0_warning_signs,
@@ -365,6 +388,11 @@ class DeterministicTriageEngine:
 
             return TriageResult(
                 priority_category="P1",
+                rule_based_priority="P1",
+                rule_based_triage="P1",
+                ml_model_priority=ml_prediction,
+                ml_model_triage=ml_prediction,
+                ml_confidence=ml_conf,
                 priority_label="⚠️ P1: Urgent Review",
                 reasons=p1_reasons,
                 warning_signs=p1_warning_signs,
@@ -428,6 +456,11 @@ class DeterministicTriageEngine:
         if p2_triggers:
             return TriageResult(
                 priority_category="P2",
+                rule_based_priority="P2",
+                rule_based_triage="P2",
+                ml_model_priority=ml_prediction,
+                ml_model_triage=ml_prediction,
+                ml_confidence=ml_conf,
                 priority_label="❓ P2: Incomplete or Uncertain",
                 reasons=p2_reasons,
                 warning_signs=[],
@@ -443,6 +476,11 @@ class DeterministicTriageEngine:
         # -------------------------------------------------------------
         return TriageResult(
             priority_category="P3",
+            rule_based_priority="P3",
+            rule_based_triage="P3",
+            ml_model_priority=ml_prediction,
+            ml_model_triage=ml_prediction,
+            ml_confidence=ml_conf,
             priority_label="📋 P3: Routine Review",
             reasons=["No emergency (P0), urgent (P1), or contradictory/uncertain (P2) criteria detected. Patient meets criteria for routine scheduled assessment."],
             warning_signs=[],

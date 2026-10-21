@@ -129,6 +129,29 @@ def render_priority_badge(priority: str) -> str:
     else:
         return '<span class="badge-err">⚠️ Review Required — AI Unavailable</span>'
 
+def render_rule_based_badge(priority: str) -> str:
+    p = (priority or "P3").upper()
+    colors = {
+        "P0": ("#FEE2E2", "#991B1B", "#F87171"),
+        "P1": ("#FEF3C7", "#92400E", "#FBBF24"),
+        "P2": ("#E0E7FF", "#3730A3", "#818CF8"),
+        "P3": ("#DCFCE7", "#166534", "#4ADE80"),
+    }
+    bg, fg, border = colors.get(p, ("#F1F5F9", "#475569", "#94A3B8"))
+    return f'<span style="background-color: {bg}; color: {fg}; border: 1px solid {border}; padding: 3px 8px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">📋 Rule-Based: {p}</span>'
+
+def render_lgbm_badge(priority: str) -> str:
+    p = (priority or "P3").upper()
+    colors = {
+        "P0": ("#FEF2F2", "#991B1B", "#F87171"),
+        "P1": ("#FFFBEB", "#92400E", "#FBBF24"),
+        "P2": ("#EEF2FF", "#3730A3", "#818CF8"),
+        "P3": ("#F0FDF4", "#166534", "#4ADE80"),
+    }
+    bg, fg, border = colors.get(p, ("#F1F5F9", "#475569", "#94A3B8"))
+    return f'<span style="background-color: {bg}; color: {fg}; border: 1.5px solid {border}; padding: 3px 8px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">🌳 LightGBM: {p}</span>'
+
+
 def render_decision_path_badge(path: str) -> str:
     path_low = (path or "").lower()
     if "model" in path_low:
@@ -257,6 +280,8 @@ with col_queue:
             conflict_flag = "⚡ Conflict/Uncertainty" if c["has_uncertainty_or_conflict"] else ""
             flags = " • ".join([f for f in [missing_flag, conflict_flag] if f])
 
+            rule_t = c.get("rule_based_triage") or priority
+            ml_t = c.get("ml_model_triage") or priority
             is_selected = (st.session_state.selected_case_id == case_id)
             box_style = "border: 2px solid #0284C7; background: #F0F9FF;" if is_selected else "background: #FFFFFF;"
 
@@ -264,7 +289,10 @@ with col_queue:
             <div style="border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; margin-bottom: 8px; {box_style}">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                     <strong>{case_id}</strong>
-                    <span>{p_badge}</span>
+                    <div style="display: flex; gap: 4px; align-items: center;">
+                        {render_rule_based_badge(rule_t)}
+                        {render_lgbm_badge(ml_t)}
+                    </div>
                 </div>
                 <div style="font-size: 14px; color: #1E293B; margin-bottom: 4px;">{chief[:80]}</div>
                 <div style="font-size: 12px; color: #64748B; display: flex; justify-content: space-between; align-items: center;">
@@ -339,9 +367,21 @@ with col_detail:
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
             decision_path = case_data.get("decision_path") or "model_urgency_reasoning"
 
+            rule_t = case_data.get("rule_based_triage") or c_prio
+            ml_t = case_data.get("ml_model_triage") or c_prio
+            is_concordant = (rule_t == ml_t)
+            concordance_badge = (
+                '<span style="background-color: #ECFDF5; color: #065F46; border: 1px solid #6EE7B7; padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">✅ Models Concordant</span>'
+                if is_concordant else
+                f'<span style="background-color: #FFF7ED; color: #C2410C; border: 1.5px solid #FDBA74; padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">⚡ Variance: Rule ({rule_t}) vs ML ({ml_t})</span>'
+            )
+
             st.markdown(f"""
             <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;">
                 {render_priority_badge(c_prio)}
+                {render_rule_based_badge(rule_t)}
+                {render_lgbm_badge(ml_t)}
+                {concordance_badge}
                 {render_decision_path_badge(decision_path)}
                 {render_status_badge(review_st)}
                 <span style="font-size: 13px; color: #475569;">
@@ -433,6 +473,47 @@ with col_detail:
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
+            # Dual Triage Signal Comparison Section
+            with st.expander("⚖️ Dual Triage Signal Comparison (Rule-Based vs LightGBM ML)", expanded=True):
+                st.caption("Side-by-side comparison of deterministic protocol guardrails vs trained LightGBM urgency classifier:")
+                c_ml1, c_ml2 = st.columns(2)
+                with c_ml1:
+                    st.markdown(f"""
+                    <div style="background: #F8FAFC; border: 1.5px solid #CBD5E1; border-radius: 8px; padding: 12px 14px;">
+                        <div style="font-weight: 700; font-size: 14px; color: #1E293B; margin-bottom: 6px;">
+                            📋 Deterministic Rule-Based Triage
+                        </div>
+                        <div style="font-size: 18px; font-weight: 800; color: #0F172A; margin-bottom: 6px;">
+                            Assigned Tier: {rule_t}
+                        </div>
+                        <div style="font-size: 13px; color: #475569; line-height: 1.5;">
+                            <strong>Decision Pathway:</strong> {decision_path.replace('_', ' ').title()}<br>
+                            <strong>Protocol Version:</strong> {rule_ver}<br>
+                            <strong>Safety Guarantee:</strong> Deterministic ESI/MTS guardrails with unmodifiable red flag safety floors.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c_ml2:
+                    st.markdown(f"""
+                    <div style="background: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 12px 14px;">
+                        <div style="font-weight: 700; font-size: 14px; color: #166534; margin-bottom: 6px;">
+                            🌳 LightGBM Tabular Urgency Classifier
+                        </div>
+                        <div style="font-size: 18px; font-weight: 800; color: #14532D; margin-bottom: 6px;">
+                            Predicted Tier: {ml_t}
+                        </div>
+                        <div style="font-size: 13px; color: #166534; line-height: 1.5;">
+                            <strong>Model Architecture:</strong> LightGBM Gradient Boosted Decision Trees<br>
+                            <strong>Input Dimensionality:</strong> 25 Tabular Features (Vitals + MedGemma SLM Extraction)<br>
+                            <strong>Signal Role:</strong> Complementary ML acuity score for clinician comparison without overriding safety floors.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                if not is_concordant:
+                    st.warning(f"⚠️ **Triage Variance Notice**: The deterministic rule-based engine assigned **{rule_t}**, while the LightGBM classifier predicted **{ml_t}**. The system defaults to the safer rule-based tier for operational queuing, but clinician assessment should weigh both signals.")
+                else:
+                    st.success(f"✅ **High Algorithmic Confidence**: Both the deterministic protocol engine and the LightGBM machine learning classifier independently concord on **{rule_t}**.")
 
             # Triage Trigger Reasons
             reasons = case_data.get("priority_reasons", [])

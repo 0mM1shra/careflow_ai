@@ -28,6 +28,7 @@ from backend.services.questioning import adaptive_questioning_service
 from backend.services.summarization import clinical_summarization_service
 from backend.services.triage_rules import triage_engine
 from backend.services.evidence_state import EvidenceStateManager
+from backend.ml_triage_service import predict_urgency_lgbm
 from backend.config import settings
 
 logger = logging.getLogger("careflow.api")
@@ -73,6 +74,7 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     """Creates a new patient intake case with a random, non-identifying ID."""
     case_id = _generate_case_id()
     init_priority = "P3"
+    init_ml_model = "P3"
     init_reasons = []
     init_missing = []
     init_uncertainties = []
@@ -83,6 +85,7 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
             ai_status="ready"
         )
         init_priority = initial_triage.priority_category
+        init_ml_model = initial_triage.ml_model_triage or "P3"
         init_reasons = initial_triage.reasons
         init_missing = initial_triage.missing_information
         init_uncertainties = initial_triage.uncertainties
@@ -96,6 +99,7 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
         chief_complaint=req.chief_complaint,
         ai_status="pending",
         priority_category=init_priority,
+        ml_model_triage=init_ml_model,
         priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
         missing_information_json=json.dumps(init_missing) if init_missing else None,
         uncertainties_json=json.dumps(init_uncertainties) if init_uncertainties else None,
@@ -170,6 +174,8 @@ def list_cases(
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             "priority_category": c.priority_category,
+            "rule_based_triage": c.priority_category,
+            "ml_model_triage": getattr(c, "ml_model_triage", None) or c.priority_category,
             "review_status": c.review_status,
             "chief_complaint": c.chief_complaint or "Not entered",
             "has_missing_info": bool(missing_info),
@@ -407,6 +413,8 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     else:
         case.priority_category = new_p
 
+    case.ml_model_triage = triage_res.ml_model_priority or triage_res.ml_model_triage
+    case.ml_confidence = triage_res.ml_confidence or 0.0
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
@@ -419,6 +427,11 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         "status": "success",
         "message": msg.to_dict(),
         "interim_priority": triage_res.priority_category,
+        "rule_based_priority": triage_res.priority_category,
+        "rule_based_triage": triage_res.priority_category,
+        "ml_model_priority": triage_res.ml_model_priority or triage_res.ml_model_triage,
+        "ml_model_triage": triage_res.ml_model_triage,
+        "ml_confidence": triage_res.ml_confidence or 0.0,
         "warning_signs": triage_res.warning_signs,
         "is_emergency": triage_res.priority_category == "P0"
     }
@@ -538,6 +551,8 @@ async def upload_medical_document(
     else:
         case.priority_category = new_p
 
+    case.ml_model_triage = triage_res.ml_model_priority or triage_res.ml_model_triage
+    case.ml_confidence = triage_res.ml_confidence or 0.0
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
@@ -552,6 +567,11 @@ async def upload_medical_document(
         "engine_used": ocr_res.engine_used,
         "confidence": ocr_res.confidence,
         "interim_priority": triage_res.priority_category,
+        "rule_based_priority": triage_res.priority_category,
+        "rule_based_triage": triage_res.priority_category,
+        "ml_model_priority": triage_res.ml_model_priority or triage_res.ml_model_triage,
+        "ml_model_triage": triage_res.ml_model_triage,
+        "ml_confidence": triage_res.ml_confidence or 0.0,
         "warning_signs": triage_res.warning_signs,
         "is_emergency": triage_res.priority_category == "P0"
     }
@@ -659,6 +679,8 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
             final_reasons = existing_reasons + [r for r in final_reasons if r not in existing_reasons]
 
     case.priority_category = final_priority
+    case.ml_model_triage = triage_res.ml_model_priority or triage_res.ml_model_triage
+    case.ml_confidence = triage_res.ml_confidence or 0.0
     case.priority_reasons_json = json.dumps(final_reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
@@ -673,6 +695,11 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
         event_type="intake_submitted",
         new_value_json=json.dumps({
             "priority": triage_res.priority_category,
+            "rule_based_priority": final_priority,
+            "rule_based_triage": final_priority,
+            "ml_model_priority": triage_res.ml_model_priority or triage_res.ml_model_triage,
+            "ml_model_triage": triage_res.ml_model_triage,
+            "ml_confidence": triage_res.ml_confidence or 0.0,
             "reasons": triage_res.reasons,
             "ai_status": case.ai_status
         }),
@@ -684,10 +711,23 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(case)
 
+    suggested_fu = (
+        evidence_st.get("next_question_hi")
+        or evidence_st.get("next_question_en")
+        or None
+    )
+
     return {
         "status": "submitted",
         "case_id": case.id,
-        "priority_category": case.priority_category,
+        "rule_based_priority": final_priority,
+        "rule_based_triage": final_priority,
+        "ml_model_priority": triage_res.ml_model_priority or triage_res.ml_model_triage,
+        "ml_model_triage": triage_res.ml_model_triage,
+        "ml_confidence": triage_res.ml_confidence or 0.0,
+        "extracted_features": evidence_st,
+        "suggested_follow_up": suggested_fu,
+        "priority_category": final_priority,
         "ai_status": case.ai_status,
         "case": case.to_dict()
     }
