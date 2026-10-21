@@ -75,6 +75,81 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# =====================================================================
+# BILINGUAL CLINICAL QUESTION & CONVERSATION TRANSLATION DICTIONARY
+# Guarantees full-screen seamless language switching (English <-> Hindi)
+# =====================================================================
+CLINICAL_QUESTIONS_TRANSLATION = {
+    "Does the chest pain radiate or spread to your left arm, shoulder, neck, jaw, or back?": "क्या सीने का दर्द आपके बाएं हाथ, कंधे, गर्दन, जबड़े या पीठ की तरफ फैल रहा है?",
+    "Are you experiencing any shortness of breath, cold sweats, nausea, or lightheadedness along with the chest pain?": "क्या सीने में दर्द के साथ सांस फूलना, ठंडा पसीना, उल्टी या चक्कर आ रहे हैं?",
+    "Did the headache peak at maximum intensity suddenly within seconds (like a thunderclap), or did it build gradually?": "क्या यह सिरदर्द अचानक कुछ ही सेकंड में असहनीय तेज हो गया, या धीरे-धीरे बढ़ा?",
+    "Do you have any neck stiffness, pain when bending your head forward, fever, or sensitivity to bright light?": "क्या आपको गर्दन में अकड़न, सिर आगे झुकाने में दर्द, बुखार या तेज रोशनी से परेशानी हो रही है?",
+    "Are you able to speak in full sentences without gasping, and does lying flat make your breathing harder?": "क्या आप बिना सांस फूले पूरे वाक्य बोल पा रहे हैं, और क्या सीधे लेटने पर सांस ज्यादा फूलती है?",
+    "Have you noticed any audible wheezing, cough with phlegm, fever, or swelling of your face or ankles?": "क्या सांस लेते समय सीटी जैसी आवाज (घरघराहट), खांसी में बलगम, बुखार या चेहरे/पैरों में सूजन है?",
+    "Where exactly in your abdomen is the pain located, and are you able to keep water or fluids down without vomiting?": "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी या तरल चीजें बिना उल्टी किए पचा पा रहे हैं?",
+    "Does the pain radiate through to your back or shoulder, and have you had fever, chills, or yellowing of the eyes?": "क्या यह दर्द पीठ या कंधे की तरफ जाता है, और क्या आपको बुखार, कंपकंपी या आंखों में पीलापन है?",
+    "How many days have you had the fever, and what was the highest temperature measured?": "आपको बुखार कितने दिनों से है, और थर्मामीटर पर सबसे अधिक तापमान कितना मापा गया?",
+    "Do you have any neck stiffness, confusion, extreme shivering, or any new rash on your skin?": "क्या आपको गर्दन में अकड़न, भ्रम या अत्यधिक कंपकंपी है, या त्वचा पर कोई नया दाना/चकत्ता है?",
+    "When did your symptoms first begin, and have they been constant, worsening, or coming and going?": "यह लक्षण सबसे पहले कब शुरू हुए और क्या यह समय के साथ बढ़ रहे हैं, घट रहे हैं या लगातार बने हुए हैं?",
+    "On a scale from 0 to 10 (where 0 is no discomfort and 10 is unbearable), how severe is your symptom right now?": "0 से 10 के पैमाने पर (जहाँ 0 कोई दर्द नहीं और 10 असहनीय दर्द है), अभी आपका दर्द कितना तीव्र है?",
+    "Are you currently taking any prescription medications, or do you have any relevant medical conditions or allergies?": "क्या आप कोई नियमित दवाइयाँ ले रहे हैं, या आपको कोई पुरानी बीमारी या एलर्जी है?",
+    "Could you clarify any other symptoms you are experiencing?": "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?",
+    "What other symptoms or discomfort are you experiencing?": "आप इसके अलावा और क्या लक्षण या परेशानी महसूस कर रहे हैं?",
+    "What symptoms or health concerns are you experiencing today?": "आज आप किन लक्षणों या स्वास्थ्य संबंधी परेशानियों का सामना कर रहे हैं?"
+}
+
+REVERSE_QUESTIONS_TRANSLATION = {v: k for k, v in CLINICAL_QUESTIONS_TRANSLATION.items()}
+
+COMMON_PATIENT_PHRASES = {
+    "chest pain": "सीने में दर्द",
+    "fever": "बुखार",
+    "headache": "सिरदर्द",
+    "cough": "खांसी",
+    "vomiting": "उल्टी",
+    "shortness of breath": "सांस लेने में तकलीफ",
+    "stomach pain": "पेट में दर्द",
+    "weakness": "कमजोरी",
+    "chills": "कंपकंपी / ठंड"
+}
+REVERSE_PATIENT_PHRASES = {v: k for k, v in COMMON_PATIENT_PHRASES.items()}
+
+def translate_question_text(text: str, target_lang: str) -> str:
+    """Translates clinical question text between English and Hindi dynamically."""
+    if not text:
+        return ""
+    t_clean = text.strip()
+    if target_lang == "Hindi":
+        if t_clean in CLINICAL_QUESTIONS_TRANSLATION:
+            return CLINICAL_QUESTIONS_TRANSLATION[t_clean]
+        for en, hi in CLINICAL_QUESTIONS_TRANSLATION.items():
+            if en in t_clean:
+                return t_clean.replace(en, hi)
+    elif target_lang == "English":
+        if t_clean in REVERSE_QUESTIONS_TRANSLATION:
+            return REVERSE_QUESTIONS_TRANSLATION[t_clean]
+        for hi, en in REVERSE_QUESTIONS_TRANSLATION.items():
+            if hi in t_clean:
+                return t_clean.replace(hi, en)
+    return text
+
+def get_patient_message_translation(text: str, target_lang: str) -> str:
+    """Provides subtitle translation for patient messages when switching language."""
+    if not text or text.startswith("[Attached"):
+        return ""
+    has_devanagari = any('\u0900' <= c <= '\u097F' for c in text)
+    if target_lang == "English" and has_devanagari:
+        # Hindi -> English translation hint
+        matched = [en for hi, en in REVERSE_PATIENT_PHRASES.items() if hi in text]
+        if matched:
+            return f"Translated: Mentions {', '.join(matched)}"
+    elif target_lang == "Hindi" and not has_devanagari:
+        # English -> Hindi translation hint
+        matched = [hi for en, hi in COMMON_PATIENT_PHRASES.items() if en in text.lower()]
+        if matched:
+            return f"अनुवाद: {', '.join(matched)} का उल्लेख"
+    return ""
+
 # Bilingual Dictionary
 UI_TEXT = {
     "English": {
@@ -222,7 +297,7 @@ UI_TEXT = {
 
 # Initialize Session State
 if "selected_lang" not in st.session_state:
-    st.session_state.selected_lang = "Auto-detect / Hinglish"
+    st.session_state.selected_lang = "🌐 Auto-Detect Language (स्वचालित भाषा पहचान)"
 if "case_id" not in st.session_state:
     st.session_state.case_id = None
 if "intake_step" not in st.session_state:
@@ -247,7 +322,7 @@ if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
 # Language selector bar in sidebar / top
-lang_options = ["Auto-detect / Hinglish", "English", "हिन्दी (Hindi)"]
+lang_options = ["🌐 Auto-Detect Language (स्वचालित भाषा पहचान)", "🇬🇧 English", "🇮🇳 हिन्दी (Hindi)"]
 with st.sidebar:
     st.markdown("### 🌐 Language / भाषा")
     curr_idx = 0
@@ -261,20 +336,31 @@ with st.sidebar:
     )
     if chosen_lang != st.session_state.selected_lang:
         st.session_state.selected_lang = chosen_lang
+        # Dynamic full-screen translation: translate current question & conversation history
+        new_target = "Hindi" if "हिन्दी" in chosen_lang else "English"
+        if st.session_state.current_question:
+            st.session_state.current_question = translate_question_text(st.session_state.current_question, new_target)
+        for m in st.session_state.messages:
+            if m.get("role") == "assistant":
+                m["content"] = translate_question_text(m.get("content", ""), new_target)
         st.rerun()
 
-t = UI_TEXT.get(st.session_state.selected_lang, UI_TEXT["English"])
-
-# Determine backend language and Whisper ASR language parameter
-if "Hindi" in st.session_state.selected_lang and "Hinglish" not in st.session_state.selected_lang:
+# Determine active UI dictionary and target language
+if "हिन्दी" in st.session_state.selected_lang:
+    current_target_lang = "Hindi"
+    t = UI_TEXT["हिन्दी (Hindi)"]
     backend_lang = "Hindi"
     asr_lang = "hi"
-elif st.session_state.selected_lang == "English":
+elif "English" in st.session_state.selected_lang:
+    current_target_lang = "English"
+    t = UI_TEXT["English"]
     backend_lang = "English"
     asr_lang = "en"
 else:
-    backend_lang = "Hinglish"
-    asr_lang = None  # Auto-detect Hinglish mixed vocabulary
+    current_target_lang = "English"
+    t = UI_TEXT["Auto-detect / Hinglish"]
+    backend_lang = "English"
+    asr_lang = "auto"  # Triggers Deepgram detect_language=True
 
 # Header
 st.markdown(f"""
@@ -448,7 +534,7 @@ if st.session_state.intake_step == "start":
                         st.session_state["last_start_voice_hash"] = curr_hash
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Voice transcription error: {e}")
+                        st.error(f"⚠️ {e}")
 
         # Document upload accordion before/with chief complaint
         with st.expander(t["doc_upload_header"], expanded=False):
@@ -549,12 +635,17 @@ elif st.session_state.intake_step == "chatting":
                 badge = '<span style="background:#EEF2FF; color:#4338CA; border:1px solid #C7D2FE; font-size:11px; font-weight:700; padding:2px 6px; border-radius:10px; margin-right:6px;">🎤 Voice Transcript</span>'
             elif src == "ocr":
                 badge = '<span style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; font-size:11px; font-weight:700; padding:2px 6px; border-radius:10px; margin-right:6px;">📄 Document OCR</span>'
-            st.markdown(f'<div class="chat-bubble-patient">{badge}<strong>{t["you_label"]}:</strong> {msg["content"]}</div>', unsafe_allow_html=True)
+            p_text = msg["content"]
+            sub_tr = get_patient_message_translation(p_text, current_target_lang)
+            sub_html = f'<div style="font-size:12px; opacity:0.8; margin-top:4px; font-style:italic;">{sub_tr}</div>' if sub_tr else ""
+            st.markdown(f'<div class="chat-bubble-patient">{badge}<strong>{t["you_label"]}:</strong> {p_text}{sub_html}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="chat-bubble-assistant"><strong>{t["assistant_label"]}:</strong> {msg["content"]}</div>', unsafe_allow_html=True)
+            disp_asst = translate_question_text(msg["content"], current_target_lang)
+            st.markdown(f'<div class="chat-bubble-assistant"><strong>{t["assistant_label"]}:</strong> {disp_asst}</div>', unsafe_allow_html=True)
 
-    # Current Question Card
-    current_q = st.session_state.current_question or ("Could you clarify any other symptoms you are experiencing?" if "English" in st.session_state.selected_lang else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?")
+    # Current Question Card (Dynamically translated to selected language)
+    current_q_raw = st.session_state.current_question or ("Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?")
+    current_q = translate_question_text(current_q_raw, current_target_lang)
     st.markdown(f'<div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">'
                 f'<strong>{t["q_label"]}</strong><br/><span style="font-size: 16px;">{current_q}</span></div>', unsafe_allow_html=True)
 
@@ -737,7 +828,7 @@ elif st.session_state.intake_step == "chatting":
                                 st.session_state["last_voice_hash"] = audio_hash
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Transcription error: {e}")
+                                st.error(f"⚠️ {e}")
 
         with col_exp2:
             with st.expander(t["upload_during_chat"], expanded=False):
