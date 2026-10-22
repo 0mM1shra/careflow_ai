@@ -25,3 +25,6 @@ evaluation_results/
 # Streamlit config/cache
 .streamlit/*
 !.streamlit/config.toml
+
+# Hugging Face Space local repo clone
+hf_space/
