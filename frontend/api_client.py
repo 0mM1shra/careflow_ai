@@ -1,7 +1,10 @@
 import os
+import sys
 import time
 import threading
+import subprocess
 import requests
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
@@ -15,7 +18,7 @@ def _ensure_backend_running(backend_url: str):
     """
     Ensures the FastAPI backend is running.
     On Streamlit Community Cloud (where only Streamlit executes), this automatically
-    spawns uvicorn in a background thread inside the container so everything works
+    spawns uvicorn in the background inside the container so everything works
     out-of-the-box without requiring a separate server.
     """
     global _backend_started
@@ -35,20 +38,39 @@ def _ensure_backend_running(backend_url: str):
         except Exception:
             pass
 
-        def _run_server():
-            try:
-                import uvicorn
-                from backend.main import app as fastapi_app
-                uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
-            except Exception as e:
-                print(f"[CareFlow] Background FastAPI startup notice: {e}")
+        # Primary method: Spawn uvicorn as an independent background subprocess
+        spawned = False
+        try:
+            root_dir = str(Path(__file__).resolve().parent.parent)
+            subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"],
+                cwd=root_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            spawned = True
+        except Exception as e:
+            print(f"[CareFlow] Subprocess uvicorn launch error: {e}")
 
-        server_thread = threading.Thread(target=_run_server, daemon=True)
-        server_thread.start()
+        # Secondary fallback: In-thread uvicorn Server with signal handlers disabled
+        if not spawned:
+            def _run_server():
+                try:
+                    import uvicorn
+                    from backend.main import app as fastapi_app
+                    config = uvicorn.Config(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
+                    server = uvicorn.Server(config)
+                    server.install_signal_handlers = lambda: None
+                    server.run()
+                except Exception as ex:
+                    print(f"[CareFlow] In-thread uvicorn notice: {ex}")
 
-        # Brief spin-wait for backend startup
-        for _ in range(12):
-            time.sleep(0.4)
+            server_thread = threading.Thread(target=_run_server, daemon=True)
+            server_thread.start()
+
+        # Spin-wait up to 8 seconds for backend to become healthy
+        for _ in range(16):
+            time.sleep(0.5)
             try:
                 if requests.get(f"{backend_url}/health", timeout=1).status_code == 200:
                     _backend_started = True
