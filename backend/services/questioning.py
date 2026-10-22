@@ -232,23 +232,54 @@ class AdaptiveQuestioningService:
 
         # Run selected MedGemma SLM provider to extract features and generate bilingual question
         slm_turn = {}
+        slm_error = None
+        extracted_rep = evidence_state.get("extracted_report") if evidence_state else None
+        known_facts = evidence_state.get("known_clinical_facts") if evidence_state else None
+
         try:
             slm_turn = medgemma_service.generate_slm_triage_turn(
                 conversation_history=patient_messages,
                 vitals=vitals,
+                extracted_report=extracted_rep,
+                previous_questions=assistant_messages,
+                known_clinical_facts=known_facts,
                 preferred_language=lang,
                 provider=provider
             )
         except Exception as slm_err:
             logger.warning(f"SLM questioning extraction encountered error: {slm_err}")
-            # If explicit provider error and not in mock mode, re-raise to avoid silent fallback
-            if isinstance(slm_err, ProviderUnavailableError) and settings.MEDGEMMA_MODE != "mock":
+            slm_error = slm_err
+            # If mock fallbacks are disabled for testing, raise actual error immediately
+            if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
                 raise
 
         q_en = slm_turn.get("next_question_en")
         q_hi = slm_turn.get("next_question_hi")
 
-        # Step 1: Check symptom-specific questions first (high-acuity red flags: hematemesis, radiation, etc.)
+        # Step 1: Return the neural model's generated question
+        if slm_turn and (q_en or q_hi):
+            q_text = q_hi if (lang.lower() == "hindi" and q_hi) else (q_en or q_hi)
+            return FollowUpQuestionOutput(
+                next_question=q_text,
+                next_question_en=q_en or q_text,
+                next_question_hi=q_hi or q_text,
+                reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
+                target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
+                is_terminal=False,
+                slm_extraction=slm_turn,
+                selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
+                validation_status=slm_turn.get("validation_status", "valid")
+            )
+
+        # Step 2: Guarded Mock Catalog Fallback (strictly disabled during live neural testing)
+        enable_mock = os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() == "true"
+        if not enable_mock:
+            raise RuntimeError(
+                f"Neural SLM inference did not produce a valid question. "
+                f"Mock fallback is disabled (ENABLE_MOCK_FALLBACK=false). Cause: {slm_error or 'Empty SLM output'}"
+            )
+
+        # Fall back to unasked clinical dimension / red-flag catalog if model question is missing and mocks are explicitly enabled
         cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
         if cat_q and not cat_q.is_terminal:
             cat_q.slm_extraction = slm_turn
@@ -257,23 +288,6 @@ class AdaptiveQuestioningService:
             cat_q.selected_provider = provider or slm_turn.get("selected_provider", "finetuned_medgemma")
             cat_q.validation_status = slm_turn.get("validation_status", "valid")
             return cat_q
-
-        # Step 2: Use MedGemma model's generated bilingual question
-        if slm_turn:
-            q_text = q_hi if lang.lower() == "hindi" else (q_en or q_hi)
-
-            if q_text and not cls._is_duplicate_question(q_text, assistant_messages):
-                return FollowUpQuestionOutput(
-                    next_question=q_text,
-                    next_question_en=q_en or q_text,
-                    next_question_hi=q_hi or q_text,
-                    reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
-                    target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
-                    is_terminal=False,
-                    slm_extraction=slm_turn,
-                    selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
-                    validation_status=slm_turn.get("validation_status", "valid")
-                )
 
         if cat_q:
             cat_q.slm_extraction = slm_turn

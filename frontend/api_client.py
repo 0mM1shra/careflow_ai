@@ -77,7 +77,7 @@ class CareFlowAPIClient:
             "transcription_confidence": conf,
             "is_confirmed": is_confirmed
         }
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=20)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=45)
         resp.raise_for_status()
         return resp.json()
 
@@ -119,7 +119,7 @@ class CareFlowAPIClient:
         return resp.json()
 
     def get_next_question(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=20)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=45)
         resp.raise_for_status()
         return resp.json()
 

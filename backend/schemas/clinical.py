@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field, field_validator
 
 # -------------------------------------------------------------
@@ -69,13 +69,43 @@ class SLMTriageTurn(BaseModel):
         "sys_musculoskeletal",
         "sys_dermatological",
         "sys_systemic",
-        "sys_eent"
+        "sys_eent",
+        "cardiopulmonary",
+        "neurological",
+        "gastrointestinal",
+        "musculoskeletal",
+        "dermatological",
+        "renal_urological",
+        "systemic",
+        "other"
     ]
-    red_flag_severe_pain: bool
-    red_flag_acute_onset: bool
-    target_triage_boundary: Literal["P0", "P1", "P2", "P3"]
+    red_flag_severe_pain: Union[bool, int]
+    red_flag_acute_onset: Union[bool, int]
+    target_triage_boundary: Literal["P0", "P1", "P2", "P3", "P0_P1", "P1_P2", "P2_P3"]
     next_question_en: str = Field(..., min_length=5, description="English follow-up question")
-    next_question_hi: str = Field(..., min_length=5, description="Hindi follow-up question")
+    next_question_hi: str = Field(..., min_length=3, description="Hindi follow-up question")
+
+    @field_validator("primary_system_flag", mode="after")
+    @classmethod
+    def normalize_sys_flag(cls, v: str) -> str:
+        if v.startswith("sys_"):
+            return v
+        alias = {
+            "cardiopulmonary": "sys_cardiopulmonary",
+            "neurological": "sys_neurological",
+            "gastrointestinal": "sys_gastrointestinal",
+            "musculoskeletal": "sys_musculoskeletal",
+            "dermatological": "sys_dermatological",
+            "renal_urological": "sys_urogenital",
+            "systemic": "sys_systemic",
+            "other": "sys_systemic"
+        }
+        return alias.get(v, f"sys_{v}")
+
+    @field_validator("red_flag_severe_pain", "red_flag_acute_onset", mode="after")
+    @classmethod
+    def normalize_bool_flags(cls, v: Union[bool, int]) -> bool:
+        return bool(v)
 
 
 class ClinicalSummaryOutput(BaseModel):

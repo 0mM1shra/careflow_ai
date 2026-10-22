@@ -80,6 +80,8 @@ st.markdown("""
 # BILINGUAL CLINICAL QUESTION & CONVERSATION TRANSLATION DICTIONARY
 # Guarantees full-screen seamless language switching (English <-> Hindi)
 # =====================================================================
+# Guarded legacy translation dictionary preserved for offline reference
+# Live execution uses pure neural translation via backend.services.translation
 CLINICAL_QUESTIONS_TRANSLATION = {
     "Does the chest pain radiate or spread to your left arm, shoulder, neck, jaw, or back?": "क्या सीने का दर्द आपके बाएं हाथ, कंधे, गर्दन, जबड़े या पीठ की तरफ फैल रहा है?",
     "Are you experiencing any shortness of breath, cold sweats, nausea, or lightheadedness along with the chest pain?": "क्या सीने में दर्द के साथ सांस फूलना, ठंडा पसीना, उल्टी या चक्कर आ रहे हैं?",
@@ -115,22 +117,18 @@ COMMON_PATIENT_PHRASES = {
 REVERSE_PATIENT_PHRASES = {v: k for k, v in COMMON_PATIENT_PHRASES.items()}
 
 def translate_question_text(text: str, target_lang: str) -> str:
-    """Translates clinical question text between English and Hindi dynamically."""
+    """Translates clinical question text dynamically using zero-VRAM neural translation."""
     if not text:
         return ""
     t_clean = text.strip()
-    if target_lang == "Hindi":
-        if t_clean in CLINICAL_QUESTIONS_TRANSLATION:
-            return CLINICAL_QUESTIONS_TRANSLATION[t_clean]
-        for en, hi in CLINICAL_QUESTIONS_TRANSLATION.items():
-            if en in t_clean:
-                return t_clean.replace(en, hi)
-    elif target_lang == "English":
-        if t_clean in REVERSE_QUESTIONS_TRANSLATION:
-            return REVERSE_QUESTIONS_TRANSLATION[t_clean]
-        for hi, en in REVERSE_QUESTIONS_TRANSLATION.items():
-            if hi in t_clean:
-                return t_clean.replace(hi, en)
+    try:
+        from backend.services.translation import translation_service
+        if target_lang == "Hindi":
+            return translation_service.translate_to_hindi(t_clean, default_hindi=t_clean)
+        elif target_lang == "English":
+            return translation_service.translate_to_english(t_clean)
+    except Exception:
+        pass
     return text
 
 def get_patient_message_translation(text: str, target_lang: str) -> str:
@@ -728,8 +726,33 @@ elif st.session_state.intake_step == "chatting":
         current_q = st.session_state.get("current_question_en") or st.session_state.current_question or translate_question_text(st.session_state.get("current_question_hi") or "", "English")
     if not current_q:
         current_q = "Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?"
-    st.markdown(f'<div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">'
-                f'<strong>{t["q_label"]}</strong><br/><span style="font-size: 16px;">{current_q}</span></div>', unsafe_allow_html=True)
+
+    # Browser-native zero-VRAM / zero-credit Text-to-Speech (Web Speech API)
+    clean_js_q = current_q.replace("'", "\\'").replace('"', '&quot;').replace('\n', ' ')
+    tts_lang = "hi-IN" if current_target_lang == "Hindi" else "en-US"
+    tts_btn_label = "🔊 सुनें (Audio)" if current_target_lang == "Hindi" else "🔊 Listen (Audio)"
+
+    st.markdown(f'''
+    <div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">
+        <strong>{t["q_label"]}</strong><br/>
+        <span style="font-size: 16px;">{current_q}</span>
+        <div style="margin-top: 8px;">
+            <button onclick="
+                if ('speechSynthesis' in window) {{
+                    window.speechSynthesis.cancel();
+                    var u = new SpeechSynthesisUtterance('{clean_js_q}');
+                    u.lang = '{tts_lang}';
+                    u.rate = 0.95;
+                    window.speechSynthesis.speak(u);
+                }} else {{
+                    alert('Web Speech API is not supported in this browser.');
+                }}
+            " style="background: #0284C7; color: white; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; font-weight: 500;">
+                {tts_btn_label}
+            </button>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
 
     backend_lang = "Hindi" if "Hindi" in st.session_state.selected_lang else "English"
 

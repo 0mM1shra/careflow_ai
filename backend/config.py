@@ -9,8 +9,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 class Settings:
+    # 3-Mode Model Router: 'base_ollama' (default base medgemma-4b-it), 'finetuned_ollama', or 'external_api'
+    MEDGEMMA_BACKEND_MODE: str = os.getenv("MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
+    BASE_OLLAMA_MODEL: str = os.getenv("BASE_OLLAMA_MODEL", "medgemma-4b-it")
+
+    # Universal OpenAI-Compatible External API (Groq, OpenRouter, Colab vLLM, Gemini)
+    EXTERNAL_API_BASE_URL: str = os.getenv("EXTERNAL_API_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+    EXTERNAL_API_KEY: str = os.getenv("EXTERNAL_API_KEY", "")
+    EXTERNAL_API_MODEL: str = os.getenv("EXTERNAL_API_MODEL", "gemma2-9b-it")
+
     # Model execution mode: 'mock', 'hosted', or 'local' (or 'peft')
     MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "local").lower()
+    ENABLE_MOCK_FALLBACK: bool = os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() == "true"
     
     # Model Identifier & Fine-Tuned LoRA Adapter
     MEDGEMMA_MODEL_ID: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
@@ -18,8 +28,8 @@ class Settings:
     MEDGEMMA_ADAPTER_PATH: str = os.getenv("MEDGEMMA_ADAPTER_PATH", str(BASE_DIR / "careflow-medgemma-final"))
     
     # Provider Abstraction Configuration:
-    # 'standard_medgemma' (hosted API / base model) vs 'finetuned_medgemma' (local Ollama 'careflow-slm' / PEFT)
-    DEFAULT_MEDGEMMA_PROVIDER: str = os.getenv("DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+    # 'standard_medgemma' (local base medgemma-4b-it / hosted API) vs 'finetuned_medgemma'
+    DEFAULT_MEDGEMMA_PROVIDER: str = os.getenv("DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "careflow-slm")
     STANDARD_MEDGEMMA_MODEL_ID: str = os.getenv("STANDARD_MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")

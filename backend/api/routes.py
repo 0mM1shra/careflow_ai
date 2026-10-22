@@ -1,3 +1,4 @@
+import os
 import uuid
 
 import json
@@ -49,6 +50,7 @@ from backend.schemas.clinical import (
 )
 
 from backend.services.medgemma import medgemma_service, ModelInferenceError
+from backend.ml_triage_service import predict_urgency_lgbm_with_details, predict_urgency_lgbm
 
 from backend.services.extraction import clinical_extraction_service
 
@@ -698,119 +700,83 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     # Collect all patient messages so far
 
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
-
-
-
-    # Run clinical fact extraction via MedGemma
-
-    try:
-
-        extraction = clinical_extraction_service.extract_clinical_facts(all_msgs)
-
-        # Update persistent evidence state
-
-        EvidenceStateManager.update_evidence_state(
-
-            db=db,
-
-            case=case,
-
-            extraction=extraction,
-
-            source_message=msg,
-
-            actor_role="ai_system"
-
-        )
-
-        case.ai_status = "ready"
-
-        db.commit()
-
-    except Exception as e:
-
-        logger.error(f"Error during extraction for case {case_id}: {e}")
-
-        db.rollback()
-
-        case = db.query(Case).filter(Case.id == case_id).first()
-
-        if case:
-
-            case.ai_status = "failed"
-
-            case.priority_category = "ERR"
-
-            case.priority_reasons_json = json.dumps([f"Clinical extraction error: {type(e).__name__}"])
-
-            db.commit()
-
-
-
-    # Interim Red-Flag Check: Emergency warning must NOT be delayed while questioning continues
-
+    assistant_msgs = [m.content for m in case.messages if m.role == "assistant"]
     current_evidence = json.loads(case.evidence_state_json or "{}")
+    vitals = current_evidence.get("vitals", {})
+    active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
 
+    # Direct 6-Field SLM Turn Execution (zero 13-field bottleneck!)
+    slm_turn = {}
+    try:
+        slm_turn = medgemma_service.generate_slm_triage_turn(
+            conversation_history=all_msgs,
+            vitals=vitals,
+            extracted_report=current_evidence.get("extracted_report"),
+            previous_questions=assistant_msgs,
+            preferred_language=case.preferred_language or "en",
+            provider=active_prov
+        )
+        current_evidence["slm_extraction"] = slm_turn
+        current_evidence["pending_slm_turn"] = slm_turn
+
+        # Map extracted indicators into evidence symptoms for downstream rule safety
+        symps = current_evidence.setdefault("symptoms", {})
+        if slm_turn.get("red_flag_severe_pain"):
+            symps["severe_pain"] = "reported"
+        if slm_turn.get("red_flag_acute_onset"):
+            symps["acute_onset"] = "reported"
+        if slm_turn.get("primary_system_flag"):
+            symps["primary_system"] = slm_turn["primary_system_flag"]
+
+        case.evidence_state_json = json.dumps(current_evidence)
+        case.ai_status = "ready"
+    except Exception as e:
+        logger.error(f"Error during direct SLM turn for case {case_id}: {e}")
+        if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
+            raise
+        case.ai_status = "failed"
+        case.priority_category = "ERR"
+        case.priority_reasons_json = json.dumps([f"SLM Turn Error: {type(e).__name__} - {str(e)}"])
+
+    # Immediate LightGBM Feature Routing & Triage Inference
+    lgbm_res = predict_urgency_lgbm_with_details(
+        slm_json_output=slm_turn,
+        lab_vitals_dict=vitals
+    )
+    predicted_ml = lgbm_res.get("ml_model_triage") or "P3"
+    case.ml_model_triage = predicted_ml
+
+    # Rule-Based Triage Engine evaluation
     triage_res = triage_engine.evaluate(
-
         evidence_state=current_evidence,
-
         raw_messages=all_msgs,
-
-        ai_status=case.ai_status
-
+        ai_status=case.ai_status,
+        vitals=vitals
     )
 
-    
-
     # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
-
     new_p = triage_res.priority_category
-
     curr_p = case.priority_category
 
-
-
     if curr_p == "P0" or new_p == "P0":
-
         case.priority_category = "P0"
-
     elif curr_p == "P1" or new_p == "P1":
-
         case.priority_category = "P1"
-
     elif curr_p == "P2" or new_p == "P2":
-
         case.priority_category = "P2"
-
     elif new_p == "ERR" or case.ai_status == "failed":
-
         case.priority_category = "ERR"
-
     else:
-
         case.priority_category = new_p
 
-
-
     case.priority_reasons_json = json.dumps(triage_res.reasons)
-
     case.missing_information_json = json.dumps(triage_res.missing_information)
-
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
-
     case.rule_based_triage = getattr(triage_res, "rule_based_triage", None) or case.priority_category
-
     case.final_triage = getattr(triage_res, "final_triage", None) or case.priority_category
-
     case.escalation_applied = getattr(triage_res, "escalation_applied", False)
-
     case.escalation_reason = getattr(triage_res, "escalation_reason", None)
-
-    case.ml_model_triage = triage_res.ml_model_triage or "P3"
-
     case.updated_at = datetime.utcnow()
-
     db.commit()
 
 
@@ -972,57 +938,12 @@ async def upload_medical_document(
 
 
     # Collect all patient messages so far
-
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
-
-
-
-    # Run clinical extraction
-
-    try:
-
-        extraction = clinical_extraction_service.extract_clinical_facts(all_msgs)
-
-        EvidenceStateManager.update_evidence_state(
-
-            db=db,
-
-            case=case,
-
-            extraction=extraction,
-
-            source_message=msg,
-
-            actor_role="ai_system"
-
-        )
-
-        case.ai_status = "ready"
-
-        db.commit()
-
-    except Exception as e:
-
-        logger.error(f"Error during extraction for uploaded document in case {case_id}: {e}")
-
-        db.rollback()
-
-        case = db.query(Case).filter(Case.id == case_id).first()
-
-        if case:
-
-            case.ai_status = "failed"
-
-            case.priority_category = "ERR"
-
-            case.priority_reasons_json = json.dumps([f"Document extraction error: {type(e).__name__}"])
-
-            db.commit()
-
-
-
-    # Interim Red-Flag Check
+    assistant_msgs = [m.content for m in case.messages if m.role == "assistant"]
     current_evidence = json.loads(case.evidence_state_json or "{}")
+
+    # Ingest document text into persistent clinical evidence
+    current_evidence["extracted_report"] = formatted_content
 
     # Ingest continuous vitals from OCR text if present (lab reports, monitors, discharge notes)
     try:
@@ -1035,14 +956,54 @@ async def upload_medical_document(
             elif vk not in ev_vitals:
                 ev_vitals[vk] = vv
         current_evidence["vitals"] = ev_vitals
-        case.evidence_state_json = json.dumps(current_evidence)
     except Exception as v_err:
         logger.warning(f"Failed to ingest vitals from OCR text: {v_err}")
+
+    # Direct 6-field turn execution on document findings (zero 13-field delay!)
+    slm_turn = {}
+    try:
+        slm_turn = medgemma_service.generate_slm_triage_turn(
+            conversation_history=all_msgs,
+            vitals=current_evidence.get("vitals", {}),
+            extracted_report=extracted_text,
+            previous_questions=assistant_msgs,
+            preferred_language=case.preferred_language or "en",
+            provider=getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
+        )
+        current_evidence["slm_extraction"] = slm_turn
+        current_evidence["pending_slm_turn"] = slm_turn
+
+        symps = current_evidence.setdefault("symptoms", {})
+        if slm_turn.get("red_flag_severe_pain"):
+            symps["severe_pain"] = "reported"
+        if slm_turn.get("red_flag_acute_onset"):
+            symps["acute_onset"] = "reported"
+        if slm_turn.get("primary_system_flag"):
+            symps["primary_system"] = slm_turn["primary_system_flag"]
+
+        case.evidence_state_json = json.dumps(current_evidence)
+        case.ai_status = "ready"
+    except Exception as e:
+        logger.error(f"Error during document SLM triage turn for case {case_id}: {e}")
+        if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
+            raise
+        case.ai_status = "failed"
+        case.priority_category = "ERR"
+        case.priority_reasons_json = json.dumps([f"Document extraction error: {type(e).__name__} - {str(e)}"])
+
+    # Immediate LightGBM feature routing
+    lgbm_res = predict_urgency_lgbm_with_details(
+        slm_json_output=slm_turn,
+        lab_vitals_dict=current_evidence.get("vitals")
+    )
+    predicted_ml = lgbm_res.get("ml_model_triage") or "P3"
+    case.ml_model_triage = predicted_ml
 
     triage_res = triage_engine.evaluate(
         evidence_state=current_evidence,
         raw_messages=all_msgs,
-        ai_status=case.ai_status
+        ai_status=case.ai_status,
+        vitals=current_evidence.get("vitals")
     )
 
     # Escalation hierarchy safeguard: P0 cannot be downgraded; P1 cannot be downgraded to P2/P3; P2 cannot be downgraded to P3
@@ -1063,9 +1024,11 @@ async def upload_medical_document(
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
-    case.ml_model_triage = triage_res.ml_model_triage or "P3"
+    case.rule_based_triage = getattr(triage_res, "rule_based_triage", None) or case.priority_category
+    case.final_triage = getattr(triage_res, "final_triage", None) or case.priority_category
+    case.escalation_applied = getattr(triage_res, "escalation_applied", False)
+    case.escalation_reason = getattr(triage_res, "escalation_reason", None)
     case.updated_at = datetime.utcnow()
-
     db.commit()
 
 
@@ -1128,26 +1091,36 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
 
     evidence_st = json.loads(case.evidence_state_json or "{}")
 
-
-
-    # Generate question with anti-repetition tracking
-
-    active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
-    result = adaptive_questioning_service.generate_next_question(
-
-        patient_messages=patient_msgs,
-
-        current_question_count=turn_count,
-
-        assistant_messages=assistant_msgs,
-
-        evidence_state=evidence_st,
-
-        preferred_language=case.preferred_language or "English"
-
-    ,
-        provider=active_prov
-    )
+    # If an SLM question was already generated during the patient message turn, use it immediately
+    pending_turn = evidence_st.pop("pending_slm_turn", None)
+    if pending_turn and (pending_turn.get("next_question_en") or pending_turn.get("next_question_hi")):
+        q_en = pending_turn.get("next_question_en")
+        q_hi = pending_turn.get("next_question_hi")
+        lang = (case.preferred_language or "English").lower()
+        q_text = q_hi if ("hindi" in lang and q_hi) else (q_en or q_hi)
+        result = FollowUpQuestionOutput(
+            next_question=q_text,
+            next_question_en=q_en or q_text,
+            next_question_hi=q_hi or q_text,
+            reason_for_question=f"Targeting {pending_turn.get('primary_system_flag', 'system')} indicators (boundary: {pending_turn.get('target_triage_boundary', 'P2')})",
+            target_field=pending_turn.get("primary_system_flag", "clinical_inquiry"),
+            is_terminal=False,
+            slm_extraction=pending_turn,
+            selected_provider=getattr(case, "selected_model_provider", None) or pending_turn.get("selected_provider", "finetuned_medgemma"),
+            validation_status=pending_turn.get("validation_status", "valid")
+        )
+        case.evidence_state_json = json.dumps(evidence_st)
+    else:
+        # Generate question with anti-repetition tracking via SLM
+        active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
+        result = adaptive_questioning_service.generate_next_question(
+            patient_messages=patient_msgs,
+            current_question_count=turn_count,
+            assistant_messages=assistant_msgs,
+            evidence_state=evidence_st,
+            preferred_language=case.preferred_language or "English",
+            provider=active_prov
+        )
 
 
 
@@ -1254,13 +1227,10 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
     # 3. Apply Deterministic Triage Rules
 
     triage_res = triage_engine.evaluate(
-
         evidence_state=evidence_st,
-
         raw_messages=patient_msgs,
-
-        ai_status=case.ai_status
-
+        ai_status=case.ai_status,
+        vitals=evidence_st.get("vitals")
     )
 
 
@@ -1789,7 +1759,8 @@ def run_live_ai_pipeline(req: LivePipelineRequest):
     rule_triage_res = triage_engine.evaluate(
         evidence_state={"vitals": vitals, "slm_extraction": slm_result},
         raw_messages=[req.text],
-        ai_status="ready"
+        ai_status="ready",
+        vitals=vitals
     )
 
     # 4. Multi-dimensional Clinical Explainability

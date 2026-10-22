@@ -41,7 +41,7 @@ class DeterministicTriageEngine:
             "id": "RULE-P0-RESP-02",
             "name": "Acute Severe Respiratory Compromise",
             "criterion": "Severe shortness of breath, inability to speak full sentences, or stridor",
-            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking|सांस\s*फूल|दम\s*फूल|सांस\s*लेने\s*में\s*(?:.{0,20}?)(?:तकलीफ|दिक्कत|परेशानी)|दम\s*घुट|सांस\s*नहीं\s*आ\s*रही|saans\s*lene\s*me\s*takleef|dam\s*phool\s*raha)",
+            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking|सांस\s*फूल|दम\s*फूल|सांस\s*लेने\s*में\s*(?:.{0,20}?)(?:तकलीफ|दिक्कत|परेशानी)|दम\s*घुट|सांस\s*नहीं\s*आ\s*रही|saans\s*lene\s*me\s*takleef|dam\s*phool\s*raha|sa?ns\s*(?:nhe|nahi|nahin|ni)\s*(?:liya|li)\s*ja\s*rh?a|sa?ns\s*n(?:ahi|he|hin)\s*aa?\s*rahi|saans\s*nahi\s*aarahi)",
             "action": "Immediate respiratory assessment and oxygenation support."
         },
         {
@@ -152,20 +152,33 @@ class DeterministicTriageEngine:
         self,
         evidence_state: Dict[str, Any],
         raw_messages: List[str],
-        ai_status: str = "ready"
+        ai_status: str = "ready",
+        vitals: Optional[Dict[str, Any]] = None
     ) -> TriageResult:
         """
         Main triage orchestrator method with deterministic safety gate.
-        1. Executes deterministic if-else rules (ESI/MTS protocol).
-        2. Calls trained LightGBM urgency classifier alongside the standard workflow.
-        3. Applies safety gate:
+        1. Resolves and extracts continuous vitals (from explicit arg, evidence_state, or raw text).
+        2. Executes deterministic if-else rules (ESI/MTS protocol) including continuous vital sign safety thresholds.
+        3. Calls trained LightGBM urgency classifier alongside the standard workflow.
+        4. Applies deterministic safety gate:
            - Primary displayed result comes from LightGBM prediction after deterministic safety gate.
            - Escalate when established emergency rule requires it, regardless of ML prediction.
            - Never downgrade an emergency escalation because ML predicts lower acuity.
            - If model is unavailable or inference fails, return explicit safe fallback status and escalation guidance.
         """
-        # 1. Evaluate deterministic protocol rules
-        rule_result = self._evaluate_rules(evidence_state, raw_messages, ai_status)
+        from backend.ml_triage_service import predict_urgency_lgbm_with_details, extract_vitals_with_metadata
+        all_text = " ".join(raw_messages)
+        active_vitals_input = vitals if vitals is not None else evidence_state.get("vitals")
+        parsed_vitals, imputed_features = extract_vitals_with_metadata(active_vitals_input, all_text)
+
+        # 1. Evaluate deterministic protocol rules (including vital sign thresholds)
+        rule_result = self._evaluate_rules(
+            evidence_state=evidence_state,
+            raw_messages=raw_messages,
+            ai_status=ai_status,
+            vitals=parsed_vitals,
+            imputed_fields=imputed_features
+        )
         rule_based_triage = rule_result.priority_category
 
         # If system failure (ERR), return immediately
@@ -181,15 +194,12 @@ class DeterministicTriageEngine:
         # 2. Call trained LightGBM urgency model
         ml_model_triage = None
         model_status = "available"
-        imputed_features = []
         try:
-            from backend.ml_triage_service import predict_urgency_lgbm_with_details, extract_vitals_from_dict_or_text
-            all_text = " ".join(raw_messages)
-            vitals = extract_vitals_from_dict_or_text(evidence_state.get("vitals"), all_text)
-            ml_details = predict_urgency_lgbm_with_details(evidence_state, vitals)
+            slm_features = evidence_state.get("slm_extraction") or evidence_state
+            ml_details = predict_urgency_lgbm_with_details(slm_features, parsed_vitals)
             ml_model_triage = ml_details.get("predicted_tier")
             model_status = ml_details.get("model_status", "available")
-            imputed_features = ml_details.get("imputed_features", [])
+            imputed_features = ml_details.get("imputed_features", imputed_features)
         except Exception as e:
             logger.warning(f"LightGBM ML triage prediction failed: {e}")
             model_status = "error"
@@ -250,11 +260,14 @@ class DeterministicTriageEngine:
         self,
         evidence_state: Dict[str, Any],
         raw_messages: List[str],
-        ai_status: str = "ready"
+        ai_status: str = "ready",
+        vitals: Optional[Dict[str, Any]] = None,
+        imputed_fields: Optional[List[str]] = None
     ) -> TriageResult:
         """
         Evaluates clinical evidence and generates a transparent, auditable TriageResult.
-        Combines deterministic protocol safety checks with MedGemma model-reasoned urgency signals.
+        Combines deterministic protocol safety checks with MedGemma model-reasoned urgency signals
+        and continuous vital signs thresholds (SpO2, SBP, HR, Temp).
         """
         # 1. Check for AI / System Failure
         if ai_status == "failed":
@@ -281,6 +294,15 @@ class DeterministicTriageEngine:
 
         all_patient_text = " ".join(raw_messages).lower()
         model_urgency_signals = evidence_state.get("urgency_signals", [])
+
+        # Resolve continuous vitals and imputed fields if not explicitly provided
+        from backend.ml_triage_service import extract_vitals_with_metadata
+        if vitals is not None and imputed_fields is not None:
+            active_vitals = vitals
+            active_imputed = imputed_fields
+        else:
+            active_vitals_input = vitals if vitals is not None else evidence_state.get("vitals")
+            active_vitals, active_imputed = extract_vitals_with_metadata(active_vitals_input, all_patient_text)
 
         triggered_rules: List[TriageTrigger] = []
         warning_signs: List[str] = []
@@ -323,6 +345,53 @@ class DeterministicTriageEngine:
                 warning_signs.append(f"{rule['name']}: {rule['criterion']}")
                 reasons.append(f"Triggered {rule['id']} ({rule['name']}): '{source_msg[:90]}'")
                 break
+
+        # 3b. Check Continuous Vital Signs Red Flags (ESI Level 1 / Critical Life Threats)
+        # Only evaluate explicit/measured vitals (not imputed defaults)
+        if "spo2_pct" not in active_imputed:
+            spo2 = active_vitals.get("spo2_pct")
+            if spo2 is not None and 40 <= spo2 < 92:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-SPO2",
+                    rule_name="Critical Hypoxemia (SpO2 < 92%)",
+                    priority="P0",
+                    criterion=f"Oxygen saturation SpO2 of {spo2}% is below critical threshold of 92%",
+                    matched_evidence=f"SpO2: {spo2}% (severe hypoxemia)",
+                    action_protocol="Immediate emergency high-flow oxygen therapy, respiratory stabilization, and urgent clinician transfer."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"Critical Hypoxemia: SpO2 {spo2}% (<92%)")
+                reasons.append(f"Triggered RULE-P0-VITAL-SPO2 (Critical Hypoxemia): SpO2 {spo2}% is below critical threshold (<92%)")
+
+        if "systolic_bp" not in active_imputed:
+            sbp = active_vitals.get("systolic_bp")
+            if sbp is not None and 30 <= sbp < 90:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-BP",
+                    rule_name="Hypotensive Shock (Systolic BP < 90 mmHg)",
+                    priority="P0",
+                    criterion=f"Systolic blood pressure of {sbp} mmHg indicates severe circulatory shock",
+                    matched_evidence=f"Systolic BP: {sbp} mmHg (shock)",
+                    action_protocol="Immediate hemodynamic resuscitation, large-bore IV access, fluid challenge, and emergency physician evaluation."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"Hypotensive Shock: Systolic BP {sbp} mmHg (<90 mmHg)")
+                reasons.append(f"Triggered RULE-P0-VITAL-BP (Hypotensive Shock): Systolic BP {sbp} mmHg is below critical threshold (<90 mmHg)")
+
+        if "heart_rate" not in active_imputed:
+            hr = active_vitals.get("heart_rate")
+            if hr is not None and hr >= 140:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-HR",
+                    rule_name="Critical Tachyarrhythmia (Heart Rate >= 140 bpm)",
+                    priority="P0",
+                    criterion=f"Heart rate of {hr} bpm reaches life-threatening tachyarrhythmia threshold (>=140 bpm)",
+                    matched_evidence=f"Heart Rate: {hr} bpm (extreme tachycardia)",
+                    action_protocol="Immediate 12-lead ECG, continuous telemetry monitoring, and emergency cardiology evaluation."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"Critical Tachycardia: Heart rate {hr} bpm (>=140 bpm)")
+                reasons.append(f"Triggered RULE-P0-VITAL-HR (Critical Tachycardia): Heart rate {hr} bpm is >= 140 bpm")
 
         if triggered_rules:
             return TriageResult(
@@ -406,6 +475,52 @@ class DeterministicTriageEngine:
             triggered_rules.append(trigger)
             warning_signs.append("Severe Uncontrolled Pain: Extracted pain severity >= 8/10 or severe")
             reasons.append(f"Triggered RULE-P1-PAIN-02 (Severe Uncontrolled Pain): Severity fact '{sev_val}'")
+
+        # Check Continuous Vital Signs Urgent Indicators (ESI Level 2 / Urgent Acuity)
+        if "heart_rate" not in active_imputed:
+            hr = active_vitals.get("heart_rate")
+            if hr is not None and 130 < hr < 140 and not any(t.rule_id in ("RULE-P0-VITAL-HR", "RULE-P1-VITAL-HR") for t in triggered_rules):
+                trigger = TriageTrigger(
+                    rule_id="RULE-P1-VITAL-HR",
+                    rule_name="Severe Tachycardia (Heart Rate > 130 bpm)",
+                    priority="P1",
+                    criterion=f"Heart rate of {hr} bpm exceeds safe threshold of 130 bpm",
+                    matched_evidence=f"Heart Rate: {hr} bpm",
+                    action_protocol="Urgent clinical assessment, continuous vital monitoring, and 12-lead ECG within 30-60 minutes."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"Severe Tachycardia: Heart rate {hr} bpm (>130 bpm)")
+                reasons.append(f"Triggered RULE-P1-VITAL-HR (Severe Tachycardia): Heart rate {hr} bpm exceeds 130 bpm")
+
+        if "temp_f" not in active_imputed:
+            temp = active_vitals.get("temp_f")
+            if temp is not None and temp > 104.0 and not any(t.rule_id == "RULE-P1-VITAL-TEMP" for t in triggered_rules):
+                trigger = TriageTrigger(
+                    rule_id="RULE-P1-VITAL-TEMP",
+                    rule_name="Severe Hyperpyrexia (Temperature > 104.0°F)",
+                    priority="P1",
+                    criterion=f"Measured temperature of {temp}°F represents severe hyperpyrexia with neuro/sepsis risk",
+                    matched_evidence=f"Temperature: {temp}°F",
+                    action_protocol="Urgent antipyretic administration, active cooling, sepsis workup, and physician review within 1 hour."
+                )
+                triggered_rules.append(trigger)
+                warning_signs.append(f"Hyperpyrexia: Temperature {temp}°F (>104.0°F)")
+                reasons.append(f"Triggered RULE-P1-VITAL-TEMP (Hyperpyrexia): Temperature {temp}°F exceeds 104.0°F")
+
+        # Check SLM-extracted severe pain flag
+        slm_features = evidence_state.get("slm_extraction", {})
+        if (slm_features.get("red_flag_severe_pain") or evidence_state.get("symptoms", {}).get("severe_pain") == "reported") and not any(t.rule_id == "RULE-P1-PAIN-02" for t in triggered_rules):
+            trigger = TriageTrigger(
+                rule_id="RULE-P1-PAIN-02",
+                rule_name="Severe Uncontrolled Pain",
+                priority="P1",
+                criterion="SLM extracted red_flag_severe_pain=True",
+                matched_evidence="SLM identified severe pain red flag",
+                action_protocol="Urgent clinical review for acute pain etiology and analgesia."
+            )
+            triggered_rules.append(trigger)
+            warning_signs.append("Severe Uncontrolled Pain: SLM severe pain flag")
+            reasons.append("Triggered RULE-P1-PAIN-02: SLM identified red_flag_severe_pain=True")
 
         if triggered_rules:
             return TriageResult(
