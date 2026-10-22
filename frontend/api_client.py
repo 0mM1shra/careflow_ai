@@ -77,7 +77,7 @@ class CareFlowAPIClient:
             "transcription_confidence": conf,
             "is_confirmed": is_confirmed
         }
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=120)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=180)
         resp.raise_for_status()
         return resp.json()
 
@@ -97,7 +97,7 @@ class CareFlowAPIClient:
             params["model_size"] = model_size
         if translate_to_english:
             params["translate_to_english"] = "true"
-        resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=120)
+        resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=180)
         if not resp.ok:
             try:
                 err_detail = resp.json().get("detail", resp.text)
@@ -114,12 +114,12 @@ class CareFlowAPIClient:
 
     def preview_document_extraction(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/extract-document", files=files, timeout=120)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/extract-document", files=files, timeout=180)
         resp.raise_for_status()
         return resp.json()
 
     def get_next_question(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=120)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=180)
         resp.raise_for_status()
         return resp.json()
 
@@ -129,7 +129,7 @@ class CareFlowAPIClient:
         return resp.json()
 
     def regenerate_summary(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/generate-summary", timeout=30)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/generate-summary", timeout=180)
         resp.raise_for_status()
         return resp.json()
 
@@ -188,7 +188,7 @@ class CareFlowAPIClient:
 
     def upload_document(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/upload-document", files=files, timeout=120)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/upload-document", files=files, timeout=180)
         resp.raise_for_status()
         return resp.json()
 
@@ -217,7 +217,7 @@ class CareFlowAPIClient:
             "vitals": vitals or {},
             "preferred_language": preferred_language
         }
-        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=120)
+        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=180)
         resp.raise_for_status()
         return resp.json()
 

@@ -527,16 +527,6 @@ class DeterministicTriageEngine:
             p1_warning_signs.append("Rapid Deterioration: Acute onset with clinical worsening")
             p1_reasons.append("Multi-factor acuity synthesis detected acute onset with clinical deterioration and systemic involvement.")
 
-        if model_p1_triggers or protocol_p1_triggers or acuity_p1_triggers:
-            combined_p1 = protocol_p1_triggers + model_p1_triggers + acuity_p1_triggers
-            has_protocol_specific_flag = any(t.rule_id in ("RULE-P1-INF-01", "RULE-P1-CARD-05", "RULE-P1-ABD-03", "RULE-P1-RESP-04", "RULE-P1-GI-06") for t in protocol_p1_triggers)
-            if model_p1_triggers:
-                dec_path = "model_urgency_reasoning"
-            elif has_protocol_specific_flag:
-                dec_path = "protocol_safety_guardrail"
-            else:
-                dec_path = "multidimensional_acuity_synthesis"
-
         # Check Continuous Vital Signs Urgent Indicators (ESI Level 2 / Urgent Acuity)
         if "heart_rate" not in active_imputed:
             hr = active_vitals.get("heart_rate")
@@ -582,6 +572,17 @@ class DeterministicTriageEngine:
             protocol_p1_triggers.append(trigger)
             p1_warning_signs.append("Severe Uncontrolled Pain: SLM severe pain flag")
             p1_reasons.append("Triggered RULE-P1-PAIN-02: SLM identified red_flag_severe_pain=True")
+
+        if model_p1_triggers or protocol_p1_triggers or acuity_p1_triggers:
+            combined_p1 = protocol_p1_triggers + model_p1_triggers + acuity_p1_triggers
+            has_protocol_specific_flag = any(t.rule_id in ("RULE-P1-INF-01", "RULE-P1-CARD-05", "RULE-P1-ABD-03", "RULE-P1-RESP-04", "RULE-P1-GI-06") for t in protocol_p1_triggers)
+            if model_p1_triggers and not protocol_p1_triggers and not acuity_p1_triggers:
+                dec_path = "model_urgency_reasoning"
+            elif has_protocol_specific_flag or protocol_p1_triggers:
+                dec_path = "protocol_safety_guardrail"
+            else:
+                dec_path = "multidimensional_acuity_synthesis"
+
             return TriageResult(
                 priority_category="P1",
                 rule_based_priority="P1",

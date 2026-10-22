@@ -204,6 +204,110 @@ class MedicalDocumentOCRService:
             except Exception:
                 pass
 
+        # 8. Respiratory Rate (RR)
+        rr_match = re.search(r"\b(?:respiratory\s*rate|resp\s*rate|rr|respiration)\s*[:=]?\s*(\d{1,2})\s*(?:breaths/min|bpm|/min)?\b", text, re.IGNORECASE)
+        if rr_match:
+            try:
+                rr_val = float(rr_match.group(1))
+                is_unreliable = rr_val < 6 or rr_val > 65
+                facts.append(StructuredMedicalFact(
+                    measurement_name="Respiratory Rate",
+                    numeric_value=rr_val,
+                    raw_value=rr_match.group(0),
+                    unit="breaths/min",
+                    reference_range="12 - 20 breaths/min",
+                    report_date=report_date,
+                    confidence=0.92,
+                    is_uncertain=is_unreliable,
+                    uncertainty_reason="Implausible respiratory rate" if is_unreliable else None
+                ))
+                vitals["respiratory_rate"] = int(rr_val)
+            except Exception:
+                pass
+
+        # 9. White Blood Cell Count (WBC / TLC)
+        wbc_match = re.search(r"\b(?:wbc|tlc|total\s*leukocyte\s*count|white\s*blood\s*cells?)\s*[:=]?\s*(\d{1,2}(?:,\d{3})*(?:\.\d+)?|\d{3,6})\s*(?:/\s*(?:cumm|mcL|uL|mm3))?\b", text, re.IGNORECASE)
+        if wbc_match:
+            try:
+                raw_wbc_str = wbc_match.group(1).replace(",", "")
+                wbc_val = float(raw_wbc_str)
+                if wbc_val < 100:
+                    wbc_val = wbc_val * 1000
+                facts.append(StructuredMedicalFact(
+                    measurement_name="White Blood Cell Count (WBC)",
+                    numeric_value=wbc_val,
+                    raw_value=wbc_match.group(0),
+                    unit="cells/mcL",
+                    reference_range="4,000 - 11,000 /mcL",
+                    report_date=report_date,
+                    confidence=0.94,
+                    is_uncertain=wbc_val < 500 or wbc_val > 150000
+                ))
+            except Exception:
+                pass
+
+        # 10. Platelet Count (PLT)
+        plt_match = re.search(r"\b(?:platelets?|platelet\s*count|plt)\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d{2,6})\s*(?:/\s*(?:cumm|mcL|uL|mm3)|lakhs?|k)?\b", text, re.IGNORECASE)
+        if plt_match:
+            try:
+                raw_plt_str = plt_match.group(1).replace(",", "")
+                plt_val = float(raw_plt_str)
+                if plt_val < 10:
+                    plt_val = plt_val * 100000
+                elif plt_val < 1000:
+                    plt_val = plt_val * 1000
+                facts.append(StructuredMedicalFact(
+                    measurement_name="Platelet Count",
+                    numeric_value=plt_val,
+                    raw_value=plt_match.group(0),
+                    unit="/mcL",
+                    reference_range="150,000 - 450,000 /mcL",
+                    report_date=report_date,
+                    confidence=0.94,
+                    is_uncertain=plt_val < 5000 or plt_val > 2000000
+                ))
+            except Exception:
+                pass
+
+        # 11. Serum Creatinine
+        creat_match = re.search(r"\b(?:creatinine|serum\s*creatinine)\s*[:=]?\s*(\d{1,2}(?:\.\d+)?)\s*(?:mg/dL)?\b", text, re.IGNORECASE)
+        if creat_match:
+            try:
+                creat_val = float(creat_match.group(1))
+                facts.append(StructuredMedicalFact(
+                    measurement_name="Serum Creatinine",
+                    numeric_value=creat_val,
+                    raw_value=creat_match.group(0),
+                    unit="mg/dL",
+                    reference_range="0.6 - 1.2 mg/dL",
+                    report_date=report_date,
+                    confidence=0.93,
+                    is_uncertain=creat_val < 0.1 or creat_val > 25.0
+                ))
+            except Exception:
+                pass
+
+        # 12. Clinical Symptoms / Findings in Report
+        symptom_patterns = [
+            ("Chest Pain / Angina", r"\b(?:chest\s*pain|angina|cardiac\s*ischemia)\b"),
+            ("Shortness of Breath / Dyspnea", r"\b(?:shortness\s*of\s*breath|dyspnea|breathlessness|difficulty\s*breathing)\b"),
+            ("High Fever / Chills", r"\b(?:high\s*(?:grade\s*)?fever|chills|rigors|pyrexia)\b"),
+            ("Severe Headache", r"\b(?:severe\s*headache|migraine|thunderclap\s*headache)\b"),
+            ("Dizziness / Syncope", r"\b(?:dizziness|syncope|fainting|vertigo)\b"),
+            ("Tachycardia / Palpitations", r"\b(?:tachycardia|palpitations|arrhythmia)\b"),
+            ("Abdominal Pain", r"\b(?:abdominal\s*pain|acute\s*abdomen)\b")
+        ]
+        for sym_name, sym_pat in symptom_patterns:
+            m = re.search(sym_pat, text, re.IGNORECASE)
+            if m:
+                facts.append(StructuredMedicalFact(
+                    measurement_name=f"Reported Finding: {sym_name}",
+                    raw_value=m.group(0),
+                    report_date=report_date,
+                    confidence=0.90,
+                    is_uncertain=False
+                ))
+
         return facts, vitals
 
     def _get_paddle_ocr(self, lang: str = "en"):
@@ -251,24 +355,90 @@ class MedicalDocumentOCRService:
             logger.warning(f"PaddleOCR execution failed: {e}")
             return None, 0.0
 
-    @staticmethod
-    def extract_from_pdf(file_bytes: bytes) -> Tuple[str, str, float]:
-        """Extracts text content from a PDF document using pypdf."""
+    def _extract_pdf_via_ocr(self, file_bytes: bytes) -> Tuple[str, str, float]:
+        """
+        Rasterizes PDF pages to high-resolution images via pypdfium2
+        and runs multi-tier native OCR on each page.
+        """
+        pages_ocr_text = []
+        confidences = []
+        last_engine = "winocr"
+
+        try:
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(file_bytes)
+            max_pages = min(len(pdf), 8)
+            for i in range(max_pages):
+                page = pdf[i]
+                pil_image = page.render(scale=2.0).to_pil()
+
+                buf = io.BytesIO()
+                pil_image.save(buf, format="PNG")
+                img_bytes = buf.getvalue()
+
+                page_text, eng, conf = self.extract_from_image(img_bytes)
+                if page_text and not page_text.startswith("[Image uploaded:"):
+                    pages_ocr_text.append(f"--- Page {i+1} ---\n{page_text.strip()}")
+                    confidences.append(conf)
+                    last_engine = eng
+
+            if pages_ocr_text:
+                avg_conf = round(sum(confidences) / len(confidences), 2) if confidences else 0.90
+                return "\n\n".join(pages_ocr_text), f"pdf_{last_engine}", avg_conf
+        except Exception as e:
+            logger.warning(f"pypdfium2 PDF page OCR failed: {e}")
+
+        return (
+            "[PDF document uploaded: text could not be extracted automatically. Please verify or manually type key findings.]",
+            "pdf_fallback_failed",
+            0.0
+        )
+
+    def extract_from_pdf(self, file_bytes: bytes) -> Tuple[str, str, float]:
+        """
+        Extracts text content from a PDF document.
+        Tries pypdf direct embedded text extraction first.
+        If the PDF contains replacement glyphs (\ufffd), low alphanumeric density (< 0.60),
+        or scanned pages, seamlessly falls back to pypdfium2 high-res rasterization + native OCR.
+        """
+        needs_ocr = False
+        raw_pages_text = []
+
         try:
             import pypdf
             reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            pages_text = []
             for idx, page in enumerate(reader.pages):
-                txt = page.extract_text()
-                if txt and txt.strip():
-                    pages_text.append(f"--- Page {idx+1} ---\n{txt.strip()}")
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    raw_pages_text.append((idx + 1, txt.strip()))
 
-            if not pages_text:
-                return "[Note: PDF contains scanned pages without embedded text layer.]", "pypdf", 0.5
-            return "\n\n".join(pages_text), "pypdf", 0.95
+            full_combined = " ".join(t[1] for t in raw_pages_text)
+
+            if not raw_pages_text or len(full_combined.strip()) < 15:
+                needs_ocr = True
+            else:
+                ufffd_count = full_combined.count("\ufffd")
+                if ufffd_count >= 3:
+                    logger.info(f"PDF contains {ufffd_count} replacement characters (\ufffd). Routing to OCR rendering...")
+                    needs_ocr = True
+                else:
+                    non_ws = [c for c in full_combined if not c.isspace()]
+                    if non_ws:
+                        alnum_count = sum(1 for c in non_ws if c.isalnum())
+                        ratio = alnum_count / len(non_ws)
+                        if ratio < 0.60:
+                            logger.info(f"PDF text has low alphanumeric ratio ({ratio:.2f}). Routing to OCR rendering...")
+                            needs_ocr = True
+
+            if not needs_ocr and raw_pages_text:
+                formatted = "\n\n".join(f"--- Page {pg} ---\n{txt}" for pg, txt in raw_pages_text)
+                return formatted, "pypdf", 0.95
+
         except Exception as e:
-            logger.error(f"Error parsing PDF document: {e}")
-            return f"[Error parsing PDF: {str(e)}]", "pypdf_error", 0.0
+            logger.warning(f"Direct pypdf extraction error: {e}. Falling back to OCR rendering...")
+            needs_ocr = True
+
+        return self._extract_pdf_via_ocr(file_bytes)
 
     def extract_from_image(self, file_bytes: bytes) -> Tuple[str, str, float]:
         """
@@ -415,3 +585,7 @@ class MedicalDocumentOCRService:
 ocr_service = MedicalDocumentOCRService()
 detect_medical_document = MedicalDocumentOCRService.detect_medical_document
 extract_structured_medical_facts = MedicalDocumentOCRService.extract_structured_medical_facts
+
+
+extract_from_pdf = ocr_service.extract_from_pdf
+extract_from_image = ocr_service.extract_from_image

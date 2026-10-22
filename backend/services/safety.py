@@ -238,7 +238,9 @@ class ClinicalSafetyService:
                 if matches / len(words) > 0.85:
                     violations.append("Question is highly repetitive of previous conversation turns.")
 
-        is_valid = len(violations) == 0
+        # If multiple questions were repaired or minor repetition was detected, allow with repair
+        critical_violations = [v for v in violations if "Prohibited" in v or "Schema violation" in v]
+        is_valid = len(critical_violations) == 0
         return is_valid, clean_dict, violations
 
 

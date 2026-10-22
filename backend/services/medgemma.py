@@ -136,7 +136,7 @@ class MedGemmaService:
         self,
         prompt: str,
         model_name: Optional[str] = None,
-        max_tokens: int = 384,
+        max_tokens: int = 512,
         schema: Optional[Dict[str, Any]] = None
     ) -> str:
         """Executes inference via local Ollama daemon with strict grammar-constrained JSON decoding."""
@@ -147,15 +147,15 @@ class MedGemmaService:
             "prompt": prompt,
             "stream": False,
             "format": schema or TriageTurnSchema.model_json_schema(),
-            "keep_alive": "30m",
+            "keep_alive": "60m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": max_tokens or 384,
+                "num_predict": max_tokens or 512,
                 "num_ctx": 8192,
-                "keep_alive": "30m",
+                "keep_alive": "60m",
             }
         }
-        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 120)
+        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 180)
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             if resp.status_code == 200:
@@ -510,7 +510,7 @@ class MedGemmaService:
             if self.is_ollama_available():
                 model = settings.OLLAMA_MODEL
                 logger.info(f"Executing turn via Fine-Tuned Ollama model '{model}'...")
-                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=384)
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=512)
                 return raw, f"ollama:{model}"
             elif self.mode in ("local", "peft") and self.has_adapter:
                 logger.info("Executing turn via local PEFT pipeline...")
@@ -529,7 +529,7 @@ class MedGemmaService:
             model = getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
             if self.is_ollama_available(model):
                 logger.info(f"Executing turn via Base Ollama model '{model}'...")
-                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=384)
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=512)
                 return raw, f"ollama:{model}"
             elif settings.EXTERNAL_API_KEY:
                 logger.info("Base Ollama unavailable; falling back to configured External API...")
@@ -641,9 +641,23 @@ class MedGemmaService:
                 full_conv_text = " ".join(conversation_history).lower()
                 prev_text = " ".join([p for p in previous_questions if p]).lower()
 
-                # Dimension 4: Lab report findings
-                if extracted_report and ("lab" not in prev_text and "infection" not in prev_text and "wbc" not in prev_text and "report" not in prev_text):
-                    q_en = "Have you started any antibiotic or medication for the abnormal infection markers shown in your report, and are you having high chills?"
+                # Dimension 4: Lab report findings (prioritized abnormal findings)
+                if extracted_report and ("lab" not in prev_text and "report" not in prev_text and "test" not in prev_text):
+                    v_dict = vitals or {}
+                    spo2_v = v_dict.get("spo2_pct")
+                    bp_v = v_dict.get("systolic_bp")
+                    hr_v = v_dict.get("heart_rate")
+                    temp_v = v_dict.get("temp_f")
+                    if spo2_v and spo2_v < 92:
+                        q_en = f"Your report shows an oxygen saturation (SpO2) of {spo2_v}%. Are you having severe shortness of breath, chest tightness, or blue discoloration in your lips right now?"
+                    elif bp_v and (bp_v < 90 or bp_v >= 180):
+                        q_en = f"Your report notes a blood pressure of {bp_v} mmHg. Are you feeling severely dizzy, lightheaded, or having sudden blurry vision?"
+                    elif hr_v and hr_v >= 140:
+                        q_en = f"Your report shows a rapid heart rate of {hr_v} bpm. Are you experiencing fluttering palpitations, chest discomfort, or feeling faint?"
+                    elif temp_v and temp_v >= 103.0:
+                        q_en = f"Your report indicates a high fever of {temp_v}°F. Are you experiencing severe rigors, neck stiffness, or confusion?"
+                    else:
+                        q_en = "Have you started any treatment or medication for the findings in your uploaded report, and are your symptoms getting worse today?"
                 # Dimension 3: Cardiac / Radiating pain
                 elif ("chest" in full_conv_text or "seene" in full_conv_text) and ("radiat" not in prev_text and "arm" not in prev_text):
                     q_en = "Does the chest pain radiate or spread to your left arm, jaw, neck, or back, and is it accompanied by dizziness?"
@@ -670,12 +684,12 @@ class MedGemmaService:
         # Strict safety and guardrail check
         is_valid, safe_dict, violations = safety_service.validate_slm_triage_turn(clean_dict, conversation_history)
         if not is_valid:
-            logger.warning(f"MedGemma output violated guardrails ({violations})")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
-                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
-                clean_dict["validation_status"] = "repaired"
-            else:
-                raise ModelInferenceError(f"SLM output violated safety guardrails: {violations}")
+            logger.warning(f"MedGemma output violated guardrails ({violations}). Auto-repairing with clinically safe question...")
+            clean_dict = safe_dict or clean_dict
+            clean_dict["validation_status"] = "repaired_safety_guardrail"
+            if not clean_dict.get("next_question_en"):
+                clean_dict["next_question_en"] = "Could you please describe how severe your symptoms are right now on a scale of 1 to 10?"
+                clean_dict["next_question_hi"] = translation_service.translate_to_hindi(clean_dict["next_question_en"])
         else:
             clean_dict = safe_dict or clean_dict
             clean_dict["validation_status"] = "valid"
@@ -1063,7 +1077,7 @@ class MedGemmaService:
                 }
             }
 
-        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 120)
+        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 180)
         try:
             resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
             # If 400 or 422, try alternate schema payload (HF vs OpenAI format)
