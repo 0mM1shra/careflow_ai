@@ -91,7 +91,7 @@ class MedGemmaService:
     def is_ollama_available(self, model_name: Optional[str] = None) -> bool:
         """Checks if local Ollama service is reachable and has the requested model registered."""
         try:
-            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=3)
+            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=0.6)
             if resp.status_code == 200:
                 models = [m.get("name", "") for m in resp.json().get("models", [])]
                 target = model_name or settings.OLLAMA_MODEL
@@ -535,7 +535,7 @@ class MedGemmaService:
         Outputs strict, validated JSON matching the 6-field contract with zero mock fallbacks.
         """
         if self.mode == "mock":
-            m_turn = self._mock_slm_triage_turn(conversation_history, vitals or {})
+            m_turn = self._mock_slm_triage_turn(conversation_history, vitals or {}, previous_questions=previous_questions)
             m_turn["validation_status"] = "valid"
             m_turn["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
             m_turn["executed_runtime"] = "mock_emulator"
@@ -568,10 +568,14 @@ class MedGemmaService:
             logger.warning(f"Live SLM execution failed ({err}).")
             if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
                 logger.info("Falling back to deterministic clinical SLM engine.")
-                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
+                clean_dict = self._mock_slm_triage_turn(
+                    conversation_history,
+                    vitals or {},
+                    previous_questions=previous_questions
+                )
                 clean_dict["validation_status"] = "mock_fallback"
                 clean_dict["executed_runtime"] = "mock_fallback"
-                clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
+                clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
             else:
                 raise ModelInferenceError(f"SLM execution/validation error: {err}")
 
@@ -631,7 +635,11 @@ class MedGemmaService:
         if not is_valid:
             logger.warning(f"MedGemma output violated guardrails ({violations})")
             if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
-                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
+                clean_dict = self._mock_slm_triage_turn(
+                    conversation_history,
+                    vitals or {},
+                    previous_questions=previous_questions
+                )
                 clean_dict["validation_status"] = "repaired"
             else:
                 raise ModelInferenceError(f"SLM output violated safety guardrails: {violations}")
@@ -813,7 +821,8 @@ class MedGemmaService:
     def _mock_slm_triage_turn(
         self,
         conversation_history: List[str],
-        vitals: Optional[Dict[str, Any]] = None
+        vitals: Optional[Dict[str, Any]] = None,
+        previous_questions: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         High-fidelity clinical emulator matching the trained careflow-medgemma-final
@@ -917,67 +926,205 @@ class MedGemmaService:
         else:
             target_boundary = "P3"
 
-        # 4. Generate Clinical Follow-Up Questions (Bilingual English & Hindi)
+        # 4. Generate Clinical Follow-Up Questions (Bilingual English & Hindi) with strict Anti-Repetition
         questions_by_system = {
-            "sys_cardiopulmonary": {
-                "en": (
-                    "Does the chest pressure spread to your jaw, neck, or left arm, or are you having trouble catching your breath?"
-                    if "chest" in full_text or "seene" in full_text
-                    else "Are you able to speak in full sentences without losing your breath, and does lying flat make it worse?"
-                ),
-                "hi": (
-                    "क्या सीने का दबाव जबड़े, गर्दन या बाएं हाथ तक फैल रहा है, या सांस फूल रही है?"
-                    if "chest" in full_text or "seene" in full_text
-                    else "क्या आप बिना सांस तोड़े पूरे वाक्य बोल पा रहे हैं, और क्या लेटने पर सांस ज्यादा फूलती है?"
-                )
-            },
-            "sys_neurological": {
-                "en": (
-                    "Have you noticed any facial drooping, arm weakness, or slurred speech?"
-                    if any(w in full_text for w in ["weak", "face", "numb", "speech"])
-                    else "Do you have any neck stiffness, pain when bending your head, or changes in your vision?"
-                ),
-                "hi": (
-                    "क्या आपने चेहरे पर टेढ़ापन, हाथ में कमजोरी या बोलने में लड़खड़ाहट देखी है?"
-                    if any(w in full_text for w in ["weak", "face", "numb", "speech"])
-                    else "क्या आपकी गर्दन में अकड़न, सिर आगे झुकाने में दर्द, या देखने में कोई बदलाव है?"
-                )
-            },
-            "sys_gastrointestinal": {
-                "en": (
-                    "Was there any bright red blood or dark coffee grounds in your vomit?"
-                    if any(w in full_text for w in ["vomit", "ulti"])
-                    else "Where exactly in your abdomen is the pain located, and are you able to keep water down without vomiting?"
-                ),
-                "hi": (
-                    "क्या उल्टी में चमकीला लाल खून या कॉफी के रंग जैसा गहरा पदार्थ निकला था?"
-                    if any(w in full_text for w in ["vomit", "ulti"])
-                    else "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी बिना उल्टी किए पचा पा रहे हैं?"
-                )
-            },
-            "sys_urogenital": {
-                "en": "Have you noticed any blood in your urine, back pain, or do you have an accompanying fever?",
-                "hi": "क्या आपने पेशाब में खून देखा है, पीठ में दर्द है या साथ में बुखार आ रहा है?"
-            },
-            "sys_musculoskeletal": {
-                "en": "Have you experienced any loss of bladder or bowel control, or progressive weakness in your legs?",
-                "hi": "क्या पेशाब या शौच पर आपका नियंत्रण कम हुआ है, या पैरों में बढ़ती कमजोरी महसूस हो रही है?"
-            },
-            "sys_dermatological": {
-                "en": "Are you experiencing any swelling in your lips, tongue, or difficulty swallowing or breathing?",
-                "hi": "क्या आपके होंठ या जीभ में सूजन है, या निगलने और सांस लेने में तकलीफ हो रही है?"
-            },
-            "sys_systemic": {
-                "en": "Have you noticed any confusion, severe drowsiness, extreme shivering, or a new rash?",
-                "hi": "क्या आपको अत्यधिक सुस्ती, कंपकंपी, नया चकत्ता या भ्रम महसूस हो रहा है?"
-            },
-            "sys_eent": {
-                "en": "Are you experiencing any sudden hearing loss, ear discharge, or difficulty swallowing liquids?",
-                "hi": "क्या अचानक सुनाई देना कम हुआ है, कान से मवाद बह रहा है या तरल निगलने में तकलीफ है?"
-            }
+            "sys_systemic": [
+                {
+                    "en": "Have you noticed any confusion, severe drowsiness, extreme shivering, or a new rash?",
+                    "hi": "क्या आपको अत्यधिक सुस्ती, कंपकंपी, नया चकत्ता या भ्रम महसूस हो रहा है?"
+                },
+                {
+                    "en": "How many days have you had this fever, and what was the highest temperature you measured?",
+                    "hi": "आपको यह बुखार कितने दिनों से है, और थर्मामीटर पर अधिकतम तापमान कितना मापा गया था?"
+                },
+                {
+                    "en": "Are you experiencing any intense body aches, severe headache, neck stiffness, or persistent vomiting?",
+                    "hi": "क्या बुखार के साथ शरीर में तेज दर्द, सिरदर्द, गर्दन में अकड़न या लगातार उल्टी हो रही है?"
+                },
+                {
+                    "en": "On a scale from 1 to 10, how severe is your overall weakness or pain right now?",
+                    "hi": "1 से 10 के पैमाने पर, अभी आपकी कमजोरी या दर्द कितना तीव्र है?"
+                },
+                {
+                    "en": "Are you taking any fever medications like paracetamol, or do you have any existing chronic illnesses?",
+                    "hi": "क्या आप पैरासिटामोल जैसी कोई दवा ले रहे हैं, या आपको कोई पुरानी बीमारी है?"
+                }
+            ],
+            "sys_cardiopulmonary": [
+                {
+                    "en": "Does the chest pressure or pain spread to your jaw, neck, back, or left arm, or are you having trouble catching your breath?",
+                    "hi": "क्या सीने का दबाव जबड़े, गर्दन, पीठ या बाएं हाथ तक फैल रहा है, या सांस लेने में तकलीफ हो रही है?"
+                },
+                {
+                    "en": "Are you able to speak in full sentences without losing your breath, and does lying flat make it harder to breathe?",
+                    "hi": "क्या आप बिना सांस तोड़े पूरे वाक्य बोल पा रहे हैं, और क्या सीधे लेटने पर सांस ज्यादा फूलती है?"
+                },
+                {
+                    "en": "Did this chest discomfort start suddenly at rest or during physical exertion, and how many minutes has it lasted?",
+                    "hi": "क्या यह बेचैनी अचानक आराम करते समय शुरू हुई या परिश्रम पर, और यह कितने समय से बनी हुई है?"
+                },
+                {
+                    "en": "Do you have a history of heart disease, hypertension, or asthma, and have you taken any medication today?",
+                    "hi": "क्या आपको पहले से हृदय रोग, हाई बीपी या दमा की शिकायत है, और क्या आपने आज कोई दवा ली है?"
+                }
+            ],
+            "sys_neurological": [
+                {
+                    "en": "Have you noticed any facial drooping, arm weakness, or difficulty speaking clearly?",
+                    "hi": "क्या आपने चेहरे पर टेढ़ापन, हाथ में कमजोरी या बोलने में लड़खड़ाहट देखी है?"
+                },
+                {
+                    "en": "Did your headache reach maximum unbearable intensity within seconds (like a sudden thunderclap)?",
+                    "hi": "क्या यह सिरदर्द अचानक कुछ ही सेकंड में अत्यधिक तेज हो गया था?"
+                },
+                {
+                    "en": "Do you have severe neck stiffness, pain when bending your chin to your chest, or sensitivity to light?",
+                    "hi": "क्या गर्दन में तेज अकड़न, सिर आगे झुकाने में दर्द, या तेज रोशनी से परेशानी हो रही है?"
+                },
+                {
+                    "en": "Have you experienced any sudden loss of balance, fainting, seizure, or numbness on one side of your body?",
+                    "hi": "क्या अचानक संतुलन बिगड़ा, बेहोशी आई, दौरा पड़ा, या शरीर के एक हिस्से में सुन्नपन आया?"
+                }
+            ],
+            "sys_gastrointestinal": [
+                {
+                    "en": "Have you noticed any bright red blood or dark coffee-ground material in your vomit or stool?",
+                    "hi": "क्या उल्टी या मल में चमकीला लाल खून या कॉफी के रंग जैसा गहरा पदार्थ निकला था?"
+                },
+                {
+                    "en": "Where exactly in your abdomen is the pain located, and are you able to keep water or fluids down?",
+                    "hi": "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी या तरल बिना उल्टी किए पचा पा रहे हैं?"
+                },
+                {
+                    "en": "Does the abdominal pain radiate through to your back or shoulder, and do you have accompanying fever or chills?",
+                    "hi": "क्या पेट का दर्द पीठ या कंधे की तरफ जाता है, और क्या साथ में बुखार या कंपकंपी है?"
+                },
+                {
+                    "en": "When did your stomach symptoms first begin, and does eating food make the discomfort better or worse?",
+                    "hi": "पेट की तकलीफ सबसे पहले कब शुरू हुई, और क्या खाना खाने से यह घटती है या बढ़ती है?"
+                }
+            ],
+            "sys_urogenital": [
+                {
+                    "en": "Have you noticed any blood in your urine, lower back or flank pain, or do you have an accompanying fever?",
+                    "hi": "क्या आपने पेशाब में खून देखा है, कमर में दर्द है या साथ में बुखार आ रहा है?"
+                },
+                {
+                    "en": "Are you experiencing severe burning during urination, difficulty passing urine, or frequent urges?",
+                    "hi": "क्या पेशाब करते समय तेज जलन, पेशाब रुक-रुक कर आना, या बार-बार जाने की इच्छा हो रही है?"
+                },
+                {
+                    "en": "On a scale of 1 to 10, how severe is the pain in your lower abdomen or back right now?",
+                    "hi": "1 से 10 के पैमाने पर, अभी पेट के निचले हिस्से या पीठ में दर्द कितना तेज है?"
+                }
+            ],
+            "sys_musculoskeletal": [
+                {
+                    "en": "Did you experience a fall, twist, or direct injury, and are you able to put any weight on that limb?",
+                    "hi": "क्या आप गिरे थे, कोई मोच आई या चोट लगी, और क्या आप उस पैर या हाथ पर थोड़ा भी वजन डाल पा रहे हैं?"
+                },
+                {
+                    "en": "Have you noticed any visible swelling, deformity, or numbness in the fingers or toes beyond the joint?",
+                    "hi": "क्या जोड़ के आगे सूजन, कोई हड्डी टेढ़ी दिखना, या उंगलियों/पंजों में सुन्नपन है?"
+                },
+                {
+                    "en": "Have you experienced any loss of bladder or bowel control, or progressive weakness in your legs?",
+                    "hi": "क्या पेशाब या शौच पर आपका नियंत्रण कम हुआ है, या पैरों में बढ़ती कमजोरी महसूस हो रही है?"
+                }
+            ],
+            "sys_dermatological": [
+                {
+                    "en": "Are you experiencing any swelling in your lips, tongue, or difficulty swallowing or breathing?",
+                    "hi": "क्या आपके होंठ या जीभ में सूजन है, या निगलने और सांस लेने में तकलीफ हो रही है?"
+                },
+                {
+                    "en": "Is the rash spreading rapidly across your body, and does it blister, peel, or cause intense burning/itching?",
+                    "hi": "क्या चकत्ते शरीर पर तेजी से फैल रहे हैं, और क्या उनमें छाले, त्वचा छिलना या तेज जलन/खुजली है?"
+                },
+                {
+                    "en": "Did you recently start any new medication, food, or encounter an insect bite before the rash appeared?",
+                    "hi": "क्या चकत्ते दिखने से पहले आपने कोई नई दवा, नया भोजन लिया था या किसी कीड़े ने काटा था?"
+                }
+            ],
+            "sys_eent": [
+                {
+                    "en": "Are you having difficulty opening your mouth, swallowing your own saliva, or having trouble breathing?",
+                    "hi": "क्या मुंह खोलने, लार निगलने, या सांस लेने में परेशानी हो रही है?"
+                },
+                {
+                    "en": "Are you experiencing any sudden hearing loss, severe ear discharge, or foreign sensation in your throat?",
+                    "hi": "क्या अचानक सुनाई देना बंद हुआ, कान से मवाद बह रहा है, या गले में कुछ फंसा हुआ महसूस हो रहा है?"
+                },
+                {
+                    "en": "How many days have you had this throat or ear discomfort, and has it been accompanied by high fever?",
+                    "hi": "गले या कान में यह तकलीफ कितने दिनों से है, और क्या इसके साथ तेज बुखार भी आ रहा है?"
+                }
+            ]
         }
 
-        q_spec = questions_by_system.get(primary_sys, questions_by_system["sys_cardiopulmonary"])
+        # Filter out questions that have already been asked to prevent ANY looping
+        prev_texts = [p.lower().strip() for p in (previous_questions or []) if p and p.strip()]
+
+        def _is_similar(candidate_en: str, candidate_hi: str = "") -> bool:
+            c_en_norm = candidate_en.lower().strip()
+            c_hi_norm = candidate_hi.lower().strip()
+            for prev in prev_texts:
+                if not prev:
+                    continue
+                # Direct string/substring check (English & Hindi)
+                if c_en_norm and (c_en_norm == prev or c_en_norm in prev or prev in c_en_norm):
+                    return True
+                if c_hi_norm and (c_hi_norm == prev or c_hi_norm in prev or prev in c_hi_norm):
+                    return True
+                # Keyword overlap (English)
+                c_words = set(re.findall(r"\w{4,}", c_en_norm))
+                p_words = set(re.findall(r"\w{4,}", prev))
+                if c_words and p_words and len(c_words & p_words) / max(len(c_words), len(p_words)) > 0.40:
+                    return True
+                # Keyword overlap (Hindi)
+                if c_hi_norm:
+                    c_hi_words = set(re.findall(r"\w{3,}", c_hi_norm))
+                    if c_hi_words and p_words and len(c_hi_words & p_words) / max(len(c_hi_words), len(p_words)) > 0.40:
+                        return True
+            return False
+
+        q_list = questions_by_system.get(primary_sys, questions_by_system["sys_systemic"])
+        q_spec = None
+        for q in q_list:
+            if not _is_similar(q["en"], q.get("hi", "")):
+                q_spec = q
+                break
+
+        if not q_spec:
+            # Fallback across progressive clinical dimensions
+            dim_questions = [
+                {
+                    "en": "How many days have you been experiencing these symptoms, and have they become progressively worse?",
+                    "hi": "आपको यह लक्षण कितने दिनों से महसूस हो रहे हैं, और क्या यह समय के साथ बढ़ते जा रहे हैं?"
+                },
+                {
+                    "en": "On a scale from 1 to 10, how severe is your overall discomfort or pain right now?",
+                    "hi": "1 से 10 के पैमाने पर, अभी आपकी समग्र परेशानी या दर्द कितना तीव्र है?"
+                },
+                {
+                    "en": "Do you have any existing chronic medical conditions, or are you currently taking any prescription medications?",
+                    "hi": "क्या आपको कोई पुरानी बीमारी है, या आप वर्तमान में कोई नियमित दवा ले रहे हैं?"
+                },
+                {
+                    "en": "Are there any specific allergies or other health details you would like the doctor to review?",
+                    "hi": "क्या कोई विशेष एलर्जी या अन्य स्वास्थ्य संबंधी जानकारी है जिसे आप डॉक्टर को बताना चाहते हैं?"
+                }
+            ]
+            for dq in dim_questions:
+                if not _is_similar(dq["en"], dq.get("hi", "")):
+                    q_spec = dq
+                    break
+
+        if not q_spec:
+            q_spec = {
+                "en": "All necessary initial clinical information has been gathered. A doctor will review your case shortly.",
+                "hi": "आपकी सभी आवश्यक प्राथमिक जानकारी दर्ज कर ली गई है। डॉक्टर जल्द ही आपकी समीक्षा करेंगे।"
+            }
 
         return {
             "primary_system_flag": primary_sys,

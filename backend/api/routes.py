@@ -1187,26 +1187,38 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
 
     evidence_st = json.loads(case.evidence_state_json or "{}")
 
-    # If an SLM question was already generated during the patient message turn, use it immediately
+    # If an SLM question was already generated during the patient message turn, check for duplicate before returning
     pending_turn = evidence_st.pop("pending_slm_turn", None)
+    result = None
     if pending_turn and (pending_turn.get("next_question_en") or pending_turn.get("next_question_hi")):
-        q_en = pending_turn.get("next_question_en")
-        q_hi = pending_turn.get("next_question_hi")
-        lang = (case.preferred_language or "English").lower()
-        q_text = q_hi if ("hindi" in lang and q_hi) else (q_en or q_hi)
-        result = FollowUpQuestionOutput(
-            next_question=q_text,
-            next_question_en=q_en or q_text,
-            next_question_hi=q_hi or q_text,
-            reason_for_question=f"Targeting {pending_turn.get('primary_system_flag', 'system')} indicators (boundary: {pending_turn.get('target_triage_boundary', 'P2')})",
-            target_field=pending_turn.get("primary_system_flag", "clinical_inquiry"),
-            is_terminal=False,
-            slm_extraction=pending_turn,
-            selected_provider=getattr(case, "selected_model_provider", None) or pending_turn.get("selected_provider", "finetuned_medgemma"),
-            validation_status=pending_turn.get("validation_status", "valid")
-        )
-        case.evidence_state_json = json.dumps(evidence_st)
-    else:
+        q_en = (pending_turn.get("next_question_en") or "").strip()
+        q_hi = (pending_turn.get("next_question_hi") or "").strip()
+        from backend.services.questioning import AdaptiveQuestioningService
+        is_dup = False
+        if q_en and AdaptiveQuestioningService._is_duplicate_question(q_en, assistant_msgs):
+            is_dup = True
+        if not is_dup and q_hi and AdaptiveQuestioningService._is_duplicate_question(q_hi, assistant_msgs):
+            is_dup = True
+
+        if not is_dup and (q_en or q_hi):
+            lang = (case.preferred_language or "English").lower()
+            q_text = q_hi if ("hindi" in lang and q_hi) else (q_en or q_hi)
+            result = FollowUpQuestionOutput(
+                next_question=q_text,
+                next_question_en=q_en or q_text,
+                next_question_hi=q_hi or q_text,
+                reason_for_question=f"Targeting {pending_turn.get('primary_system_flag', 'system')} indicators (boundary: {pending_turn.get('target_triage_boundary', 'P2')})",
+                target_field=pending_turn.get("primary_system_flag", "clinical_inquiry"),
+                is_terminal=False,
+                slm_extraction=pending_turn,
+                selected_provider=getattr(case, "selected_model_provider", None) or pending_turn.get("selected_provider", "finetuned_medgemma"),
+                validation_status=pending_turn.get("validation_status", "valid")
+            )
+            case.evidence_state_json = json.dumps(evidence_st)
+        else:
+            pending_turn = None
+
+    if not result:
         # Generate question with anti-repetition tracking via SLM
         active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
         result = adaptive_questioning_service.generate_next_question(

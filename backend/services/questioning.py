@@ -493,20 +493,29 @@ class AdaptiveQuestioningService:
         q_en = slm_turn.get("next_question_en")
         q_hi = slm_turn.get("next_question_hi")
 
-        # Step 1: Return the neural SLM's generated question immediately
+        # Step 1: Return the neural SLM's generated question if valid and not already asked
         if slm_turn and (q_en or q_hi):
-            q_text = q_hi if (lang.lower() == "hindi" and q_hi) else (q_en or q_hi)
-            return FollowUpQuestionOutput(
-                next_question=q_text,
-                next_question_en=q_en or q_text,
-                next_question_hi=q_hi or q_text,
-                reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
-                target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
-                is_terminal=False,
-                slm_extraction=slm_turn,
-                selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
-                validation_status=slm_turn.get("validation_status", "valid")
-            )
+            cand_en = (q_en or "").strip()
+            cand_hi = (q_hi or "").strip()
+            is_dup = False
+            if cand_en and cls._is_duplicate_question(cand_en, assistant_messages):
+                is_dup = True
+            if not is_dup and cand_hi and cls._is_duplicate_question(cand_hi, assistant_messages):
+                is_dup = True
+
+            if not is_dup and (cand_en or cand_hi):
+                q_text = cand_hi if (lang.lower() == "hindi" and cand_hi) else (cand_en or cand_hi)
+                return FollowUpQuestionOutput(
+                    next_question=q_text,
+                    next_question_en=cand_en or q_text,
+                    next_question_hi=cand_hi or q_text,
+                    reason_for_question=f"Targeting {slm_turn.get('primary_system_flag', 'system')} indicators (boundary: {slm_turn.get('target_triage_boundary', 'P2')})",
+                    target_field=slm_turn.get("primary_system_flag", "clinical_inquiry"),
+                    is_terminal=False,
+                    slm_extraction=slm_turn,
+                    selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
+                    validation_status=slm_turn.get("validation_status", "valid")
+                )
 
         # Step 2: Fallback to targeted symptom inquiry or unasked clinical dimension catalog
         cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
