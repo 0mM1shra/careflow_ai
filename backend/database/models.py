@@ -30,6 +30,12 @@ class Case(Base):
     missing_information_json = Column(Text, default="[]", nullable=False)
     uncertainties_json = Column(Text, default="[]", nullable=False)
     triage_rule_version = Column(String(32), default="v1.0.0-prototype", nullable=False)
+    # Final Guarded Triage Result (Primary Displayed Signal)
+    final_triage = Column(String(16), default="P3", nullable=True)
+    rule_based_triage = Column(String(16), default="P3", nullable=True)
+    escalation_applied = Column(Boolean, default=False, nullable=True)
+    escalation_reason = Column(Text, nullable=True)
+    selected_model_provider = Column(String(32), default="finetuned_medgemma", nullable=True)
     decision_path = Column(String(64), default="model_urgency_reasoning", nullable=True)
     
     # Reviewer workflow: 'pending', 'reviewed', 'approved', 'reopened'
@@ -57,11 +63,15 @@ class Case(Base):
             "ai_summary": json.loads(self.ai_summary_json or "{}"),
             "ai_status": self.ai_status,
             "priority_category": self.priority_category,
-            "rule_based_priority": self.priority_category,
-            "rule_based_triage": self.priority_category,
+            "final_triage": getattr(self, "final_triage", None) or self.priority_category,
+            "rule_based_priority": getattr(self, "rule_based_triage", None) or self.priority_category,
+            "rule_based_triage": getattr(self, "rule_based_triage", None) or self.priority_category,
             "ml_model_priority": ml_prio,
             "ml_model_triage": ml_prio,
             "ml_confidence": ml_conf,
+            "escalation_applied": bool(getattr(self, "escalation_applied", False)),
+            "escalation_reason": getattr(self, "escalation_reason", None),
+            "selected_model_provider": getattr(self, "selected_model_provider", None) or "finetuned_medgemma",
             "priority_reasons": json.loads(self.priority_reasons_json or "[]"),
             "missing_information": json.loads(self.missing_information_json or "[]"),
             "uncertainties": json.loads(self.uncertainties_json or "[]"),

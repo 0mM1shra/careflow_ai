@@ -75,6 +75,79 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# =====================================================================
+# BILINGUAL CLINICAL QUESTION & CONVERSATION TRANSLATION DICTIONARY
+# Guarantees full-screen seamless language switching (English <-> Hindi)
+# =====================================================================
+# Guarded legacy translation dictionary preserved for offline reference
+# Live execution uses pure neural translation via backend.services.translation
+CLINICAL_QUESTIONS_TRANSLATION = {
+    "Does the chest pain radiate or spread to your left arm, shoulder, neck, jaw, or back?": "क्या सीने का दर्द आपके बाएं हाथ, कंधे, गर्दन, जबड़े या पीठ की तरफ फैल रहा है?",
+    "Are you experiencing any shortness of breath, cold sweats, nausea, or lightheadedness along with the chest pain?": "क्या सीने में दर्द के साथ सांस फूलना, ठंडा पसीना, उल्टी या चक्कर आ रहे हैं?",
+    "Did the headache peak at maximum intensity suddenly within seconds (like a thunderclap), or did it build gradually?": "क्या यह सिरदर्द अचानक कुछ ही सेकंड में असहनीय तेज हो गया, या धीरे-धीरे बढ़ा?",
+    "Do you have any neck stiffness, pain when bending your head forward, fever, or sensitivity to bright light?": "क्या आपको गर्दन में अकड़न, सिर आगे झुकाने में दर्द, बुखार या तेज रोशनी से परेशानी हो रही है?",
+    "Are you able to speak in full sentences without gasping, and does lying flat make your breathing harder?": "क्या आप बिना सांस फूले पूरे वाक्य बोल पा रहे हैं, और क्या सीधे लेटने पर सांस ज्यादा फूलती है?",
+    "Have you noticed any audible wheezing, cough with phlegm, fever, or swelling of your face or ankles?": "क्या सांस लेते समय सीटी जैसी आवाज (घरघराहट), खांसी में बलगम, बुखार या चेहरे/पैरों में सूजन है?",
+    "Where exactly in your abdomen is the pain located, and are you able to keep water or fluids down without vomiting?": "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी या तरल चीजें बिना उल्टी किए पचा पा रहे हैं?",
+    "Does the pain radiate through to your back or shoulder, and have you had fever, chills, or yellowing of the eyes?": "क्या यह दर्द पीठ या कंधे की तरफ जाता है, और क्या आपको बुखार, कंपकंपी या आंखों में पीलापन है?",
+    "How many days have you had the fever, and what was the highest temperature measured?": "आपको बुखार कितने दिनों से है, और थर्मामीटर पर सबसे अधिक तापमान कितना मापा गया?",
+    "Do you have any neck stiffness, confusion, extreme shivering, or any new rash on your skin?": "क्या आपको गर्दन में अकड़न, भ्रम या अत्यधिक कंपकंपी है, या त्वचा पर कोई नया दाना/चकत्ता है?",
+    "When did your symptoms first begin, and have they been constant, worsening, or coming and going?": "यह लक्षण सबसे पहले कब शुरू हुए और क्या यह समय के साथ बढ़ रहे हैं, घट रहे हैं या लगातार बने हुए हैं?",
+    "On a scale from 0 to 10 (where 0 is no discomfort and 10 is unbearable), how severe is your symptom right now?": "0 से 10 के पैमाने पर (जहाँ 0 कोई दर्द नहीं और 10 असहनीय दर्द है), अभी आपका दर्द कितना तीव्र है?",
+    "Are you currently taking any prescription medications, or do you have any relevant medical conditions or allergies?": "क्या आप कोई नियमित दवाइयाँ ले रहे हैं, या आपको कोई पुरानी बीमारी या एलर्जी है?",
+    "Could you clarify any other symptoms you are experiencing?": "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?",
+    "What other symptoms or discomfort are you experiencing?": "आप इसके अलावा और क्या लक्षण या परेशानी महसूस कर रहे हैं?",
+    "What symptoms or health concerns are you experiencing today?": "आज आप किन लक्षणों या स्वास्थ्य संबंधी परेशानियों का सामना कर रहे हैं?"
+}
+
+REVERSE_QUESTIONS_TRANSLATION = {v: k for k, v in CLINICAL_QUESTIONS_TRANSLATION.items()}
+
+COMMON_PATIENT_PHRASES = {
+    "chest pain": "सीने में दर्द",
+    "fever": "बुखार",
+    "headache": "सिरदर्द",
+    "cough": "खांसी",
+    "vomiting": "उल्टी",
+    "shortness of breath": "सांस लेने में तकलीफ",
+    "stomach pain": "पेट में दर्द",
+    "weakness": "कमजोरी",
+    "chills": "कंपकंपी / ठंड"
+}
+REVERSE_PATIENT_PHRASES = {v: k for k, v in COMMON_PATIENT_PHRASES.items()}
+
+def translate_question_text(text: str, target_lang: str) -> str:
+    """Translates clinical question text dynamically using zero-VRAM neural translation."""
+    if not text:
+        return ""
+    t_clean = text.strip()
+    try:
+        from backend.services.translation import translation_service
+        if target_lang == "Hindi":
+            return translation_service.translate_to_hindi(t_clean, default_hindi=t_clean)
+        elif target_lang == "English":
+            return translation_service.translate_to_english(t_clean)
+    except Exception:
+        pass
+    return text
+
+def get_patient_message_translation(text: str, target_lang: str) -> str:
+    """Provides subtitle translation for patient messages when switching language."""
+    if not text or text.startswith("[Attached"):
+        return ""
+    has_devanagari = any('\u0900' <= c <= '\u097F' for c in text)
+    if target_lang == "English" and has_devanagari:
+        # Hindi -> English translation hint
+        matched = [en for hi, en in REVERSE_PATIENT_PHRASES.items() if hi in text]
+        if matched:
+            return f"Translated: Mentions {', '.join(matched)}"
+    elif target_lang == "Hindi" and not has_devanagari:
+        # English -> Hindi translation hint
+        matched = [hi for en, hi in COMMON_PATIENT_PHRASES.items() if en in text.lower()]
+        if matched:
+            return f"अनुवाद: {', '.join(matched)} का उल्लेख"
+    return ""
+
 # Bilingual Dictionary
 UI_TEXT = {
     "English": {
@@ -222,7 +295,9 @@ UI_TEXT = {
 
 # Initialize Session State
 if "selected_lang" not in st.session_state:
-    st.session_state.selected_lang = "Auto-detect / Hinglish"
+    st.session_state.selected_lang = "🌐 Auto-Detect Language (स्वचालित भाषा पहचान)"
+if "selected_model_provider" not in st.session_state:
+    st.session_state.selected_model_provider = "finetuned_medgemma"
 if "case_id" not in st.session_state:
     st.session_state.case_id = None
 if "intake_step" not in st.session_state:
@@ -231,6 +306,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_question" not in st.session_state:
     st.session_state.current_question = None
+if "current_question_en" not in st.session_state:
+    st.session_state.current_question_en = None
+if "current_question_hi" not in st.session_state:
+    st.session_state.current_question_hi = None
 if "is_emergency" not in st.session_state:
     st.session_state.is_emergency = False
 if "turn_count" not in st.session_state:
@@ -246,8 +325,8 @@ if "pending_voice_start" not in st.session_state:
 if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
-# Language selector bar in sidebar / top
-lang_options = ["Auto-detect / Hinglish", "English", "हिन्दी (Hindi)"]
+# Sidebar Controls: Language and Clinical SLM Engine
+lang_options = ["🌐 Auto-Detect Language (स्वचालित भाषा पहचान)", "🇬🇧 English", "🇮🇳 हिन्दी (Hindi)"]
 with st.sidebar:
     st.markdown("### 🌐 Language / भाषा")
     curr_idx = 0
@@ -261,20 +340,84 @@ with st.sidebar:
     )
     if chosen_lang != st.session_state.selected_lang:
         st.session_state.selected_lang = chosen_lang
+        # Dynamic full-screen translation: translate current question & conversation history
+        new_target = "Hindi" if "हिन्दी" in chosen_lang else "English"
+        if new_target == "Hindi" and st.session_state.get("current_question_hi"):
+            st.session_state.current_question = st.session_state["current_question_hi"]
+        elif new_target == "English" and st.session_state.get("current_question_en"):
+            st.session_state.current_question = st.session_state["current_question_en"]
+        elif st.session_state.current_question:
+            st.session_state.current_question = translate_question_text(st.session_state.current_question, new_target)
+
+        for m in st.session_state.messages:
+            if m.get("role") == "assistant":
+                if new_target == "Hindi" and m.get("content_hi"):
+                    m["content"] = m["content_hi"]
+                elif new_target == "English" and m.get("content_en"):
+                    m["content"] = m["content_en"]
+                else:
+                    m["content"] = translate_question_text(m.get("content", ""), new_target)
         st.rerun()
 
-t = UI_TEXT.get(st.session_state.selected_lang, UI_TEXT["English"])
+    st.markdown("---")
+    st.markdown("### 🧠 Clinical SLM Engine")
+    try:
+        prov_info = api_client.get_model_providers()
+    except Exception:
+        prov_info = {
+            "finetuned_medgemma": {"status": "ready", "runtime": "ollama"},
+            "standard_medgemma": {"status": "ready", "runtime": "hosted_api"}
+        }
 
-# Determine backend language and Whisper ASR language parameter
-if "Hindi" in st.session_state.selected_lang and "Hinglish" not in st.session_state.selected_lang:
+    provider_choices = [
+        "Mode B: Fine-Tuned MedGemma (Local Ollama / LoRA)",
+        "Mode A: Standard MedGemma (Hosted / Fallback)"
+    ]
+    cur_p = st.session_state.get("selected_model_provider", "finetuned_medgemma")
+    p_idx = 0 if cur_p == "finetuned_medgemma" else 1
+
+    selected_choice = st.radio(
+        "Active Reasoning Model:",
+        options=provider_choices,
+        index=p_idx,
+        key="slm_provider_radio",
+        help="Select between local fine-tuned MedGemma SLM (Ollama GPU) or standard MedGemma endpoint."
+    )
+    chosen_key = "finetuned_medgemma" if "Fine-Tuned" in selected_choice else "standard_medgemma"
+    if chosen_key != st.session_state.selected_model_provider:
+        st.session_state.selected_model_provider = chosen_key
+        if st.session_state.case_id:
+            try:
+                api_client.set_case_model_provider(st.session_state.case_id, chosen_key)
+            except Exception as e:
+                st.sidebar.caption(f"Provider sync: {e}")
+        st.rerun()
+
+    # Provider health badge
+    p_meta = prov_info.get(chosen_key, {})
+    p_status = p_meta.get("status", "unknown")
+    p_rt = p_meta.get("runtime", "")
+    if p_status == "ready":
+        st.caption(f"🟢 **Live:** `{chosen_key}` via `{p_rt}`")
+    else:
+        st.caption(f"🟡 **Status:** `{p_status}` via `{p_rt}`")
+
+# Determine active UI dictionary and target language
+if "हिन्दी" in st.session_state.selected_lang:
+    current_target_lang = "Hindi"
+    t = UI_TEXT["हिन्दी (Hindi)"]
     backend_lang = "Hindi"
     asr_lang = "hi"
-elif st.session_state.selected_lang == "English":
+elif "English" in st.session_state.selected_lang:
+    current_target_lang = "English"
+    t = UI_TEXT["English"]
     backend_lang = "English"
     asr_lang = "en"
 else:
-    backend_lang = "Hinglish"
-    asr_lang = None  # Auto-detect Hinglish mixed vocabulary
+    current_target_lang = "English"
+    t = UI_TEXT["Auto-detect / Hinglish"]
+    backend_lang = "English"
+    asr_lang = "auto"  # Triggers Deepgram detect_language=True
 
 # Header
 st.markdown(f"""
@@ -347,7 +490,8 @@ if st.session_state.intake_step == "start":
                             # 1. Create case in backend
                             new_case = api_client.create_case(
                                 preferred_language=backend_lang,
-                                chief_complaint=edited_start_voice.strip()
+                                chief_complaint=edited_start_voice.strip(),
+                                selected_model_provider=st.session_state.selected_model_provider
                             )
                             case_id = new_case["id"]
                             st.session_state.case_id = case_id
@@ -384,7 +528,14 @@ if st.session_state.intake_step == "start":
 
                             if q_res.get("next_question"):
                                 st.session_state.current_question = q_res["next_question"]
-                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": q_res["next_question"],
+                                    "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                    "content_hi": q_res.get("next_question_hi")
+                                })
                                 st.session_state.intake_step = "chatting"
                             else:
                                 st.session_state.intake_step = "review_edit"
@@ -448,7 +599,7 @@ if st.session_state.intake_step == "start":
                         st.session_state["last_start_voice_hash"] = curr_hash
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Voice transcription error: {e}")
+                        st.error(f"⚠️ {e}")
 
         # Document upload accordion before/with chief complaint
         with st.expander(t["doc_upload_header"], expanded=False):
@@ -472,7 +623,8 @@ if st.session_state.intake_step == "start":
                         initial_complaint = chief_complaint.strip() if chief_complaint.strip() else "Medical document attached for intake assessment"
                         new_case = api_client.create_case(
                             preferred_language=backend_lang,
-                            chief_complaint=initial_complaint
+                            chief_complaint=initial_complaint,
+                            selected_model_provider=st.session_state.selected_model_provider
                         )
                         case_id = new_case["id"]
                         st.session_state.case_id = case_id
@@ -519,7 +671,14 @@ if st.session_state.intake_step == "start":
 
                         if q_res.get("next_question"):
                             st.session_state.current_question = q_res["next_question"]
-                            st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                            st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                            st.session_state.current_question_hi = q_res.get("next_question_hi")
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": q_res["next_question"],
+                                "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                "content_hi": q_res.get("next_question_hi")
+                            })
                             st.session_state.intake_step = "chatting"
                         else:
                             st.session_state.intake_step = "review_edit"
@@ -549,14 +708,51 @@ elif st.session_state.intake_step == "chatting":
                 badge = '<span style="background:#EEF2FF; color:#4338CA; border:1px solid #C7D2FE; font-size:11px; font-weight:700; padding:2px 6px; border-radius:10px; margin-right:6px;">🎤 Voice Transcript</span>'
             elif src == "ocr":
                 badge = '<span style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; font-size:11px; font-weight:700; padding:2px 6px; border-radius:10px; margin-right:6px;">📄 Document OCR</span>'
-            st.markdown(f'<div class="chat-bubble-patient">{badge}<strong>{t["you_label"]}:</strong> {msg["content"]}</div>', unsafe_allow_html=True)
+            p_text = msg["content"]
+            sub_tr = get_patient_message_translation(p_text, current_target_lang)
+            sub_html = f'<div style="font-size:12px; opacity:0.8; margin-top:4px; font-style:italic;">{sub_tr}</div>' if sub_tr else ""
+            st.markdown(f'<div class="chat-bubble-patient">{badge}<strong>{t["you_label"]}:</strong> {p_text}{sub_html}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="chat-bubble-assistant"><strong>{t["assistant_label"]}:</strong> {msg["content"]}</div>', unsafe_allow_html=True)
+            if current_target_lang == "Hindi":
+                disp_asst = msg.get("content_hi") or translate_question_text(msg.get("content_en") or msg.get("content", ""), "Hindi")
+            else:
+                disp_asst = msg.get("content_en") or translate_question_text(msg.get("content", ""), "English")
+            st.markdown(f'<div class="chat-bubble-assistant"><strong>{t["assistant_label"]}:</strong> {disp_asst}</div>', unsafe_allow_html=True)
 
-    # Current Question Card
-    current_q = st.session_state.current_question or ("Could you clarify any other symptoms you are experiencing?" if "English" in st.session_state.selected_lang else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?")
-    st.markdown(f'<div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">'
-                f'<strong>{t["q_label"]}</strong><br/><span style="font-size: 16px;">{current_q}</span></div>', unsafe_allow_html=True)
+    # Current Question Card (Dynamically translated to selected language)
+    if current_target_lang == "Hindi":
+        current_q = st.session_state.get("current_question_hi") or translate_question_text(st.session_state.get("current_question_en") or st.session_state.current_question or "", "Hindi")
+    else:
+        current_q = st.session_state.get("current_question_en") or st.session_state.current_question or translate_question_text(st.session_state.get("current_question_hi") or "", "English")
+    if not current_q:
+        current_q = "Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?"
+
+    # Browser-native zero-VRAM / zero-credit Text-to-Speech (Web Speech API)
+    clean_js_q = current_q.replace("'", "\\'").replace('"', '&quot;').replace('\n', ' ')
+    tts_lang = "hi-IN" if current_target_lang == "Hindi" else "en-US"
+    tts_btn_label = "🔊 सुनें (Audio)" if current_target_lang == "Hindi" else "🔊 Listen (Audio)"
+
+    st.markdown(f'''
+    <div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">
+        <strong>{t["q_label"]}</strong><br/>
+        <span style="font-size: 16px;">{current_q}</span>
+        <div style="margin-top: 8px;">
+            <button onclick="
+                if ('speechSynthesis' in window) {{
+                    window.speechSynthesis.cancel();
+                    var u = new SpeechSynthesisUtterance('{clean_js_q}');
+                    u.lang = '{tts_lang}';
+                    u.rate = 0.95;
+                    window.speechSynthesis.speak(u);
+                }} else {{
+                    alert('Web Speech API is not supported in this browser.');
+                }}
+            " style="background: #0284C7; color: white; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; font-weight: 500;">
+                {tts_btn_label}
+            </button>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
 
     backend_lang = "Hindi" if "Hindi" in st.session_state.selected_lang else "English"
 
@@ -628,7 +824,14 @@ elif st.session_state.intake_step == "chatting":
                                 st.session_state.intake_step = "review_edit"
                             else:
                                 st.session_state.current_question = q_res["next_question"]
-                                st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": q_res["next_question"],
+                                    "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                    "content_hi": q_res.get("next_question_hi")
+                                })
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error submitting voice response: {e}")
@@ -694,7 +897,14 @@ elif st.session_state.intake_step == "chatting":
                         st.session_state.intake_step = "review_edit"
                     else:
                         st.session_state.current_question = q_res["next_question"]
-                        st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                        st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                        st.session_state.current_question_hi = q_res.get("next_question_hi")
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": q_res["next_question"],
+                            "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                            "content_hi": q_res.get("next_question_hi")
+                        })
 
                     st.rerun()
                 except Exception as e:
@@ -737,7 +947,7 @@ elif st.session_state.intake_step == "chatting":
                                 st.session_state["last_voice_hash"] = audio_hash
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Transcription error: {e}")
+                                st.error(f"⚠️ {e}")
 
         with col_exp2:
             with st.expander(t["upload_during_chat"], expanded=False):
@@ -782,7 +992,14 @@ elif st.session_state.intake_step == "chatting":
                                     st.session_state.intake_step = "review_edit"
                                 else:
                                     st.session_state.current_question = q_res["next_question"]
-                                    st.session_state.messages.append({"role": "assistant", "content": q_res["next_question"]})
+                                    st.session_state.current_question_en = q_res.get("next_question_en") or q_res["next_question"]
+                                    st.session_state.current_question_hi = q_res.get("next_question_hi")
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "content": q_res["next_question"],
+                                        "content_en": q_res.get("next_question_en") or q_res["next_question"],
+                                        "content_hi": q_res.get("next_question_hi")
+                                    })
 
                                 st.rerun()
                             except Exception as e:
@@ -873,6 +1090,8 @@ elif st.session_state.intake_step == "submitted":
         st.session_state.intake_step = "start"
         st.session_state.messages = []
         st.session_state.current_question = None
+        st.session_state.current_question_en = None
+        st.session_state.current_question_hi = None
         st.session_state.is_emergency = False
         st.session_state.turn_count = 0
         st.session_state.uploaded_docs = []

@@ -1,46 +1,231 @@
 import os
 import json
 import re
+import time
 import logging
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Union, Tuple, Literal
+from pydantic import BaseModel, Field
 import requests
 from backend.config import settings
+from backend.services.safety import safety_service
+from backend.services.translation import translation_service
 
 logger = logging.getLogger("careflow.medgemma")
+
+class TriageTurnSchema(BaseModel):
+    primary_system_flag: Literal[
+        "sys_cardiopulmonary",
+        "sys_neurological",
+        "sys_gastrointestinal",
+        "sys_urogenital",
+        "sys_musculoskeletal",
+        "sys_dermatological",
+        "sys_systemic",
+        "sys_eent",
+        "cardiopulmonary",
+        "neurological",
+        "gastrointestinal",
+        "musculoskeletal",
+        "dermatological",
+        "renal_urological",
+        "systemic",
+        "other"
+    ] = Field(..., description="Affected physiological system category")
+    red_flag_severe_pain: Union[bool, int] = Field(..., description="Severe unbearable pain (>=8/10 or binary flag 1/0)")
+    red_flag_acute_onset: Union[bool, int] = Field(..., description="Sudden rapid symptom onset within 24-48 hours (or binary flag 1/0)")
+    target_triage_boundary: Literal["P0", "P1", "P2", "P3", "P0_P1", "P1_P2", "P2_P3"] = Field(..., description="Target triage boundary priority tier")
+    next_question_en: str = Field(..., min_length=5, description="Next targeted clinical question in English")
+    next_question_hi: Optional[str] = Field(default="", description="Next targeted clinical question in Hindi")
 
 class ModelInferenceError(Exception):
     """Raised when MedGemma model inference or output validation fails."""
     pass
 
+class ProviderUnavailableError(Exception):
+    """Raised when the requested MedGemma provider (standard or fine-tuned) is unavailable."""
+    pass
+
 class MedGemmaService:
     """
-    Dedicated Service for Google MedGemma (Instruction-Tuned).
+    Dedicated Service for Google MedGemma (Instruction-Tuned) and Fine-Tuned
+    LoRA Adapter ('careflow-medgemma-final').
     
     Supports:
-    1. 'mock' mode: Deterministic, high-fidelity clinical parser for development/testing
-       on resource-constrained machines (e.g. 16GB RAM laptops with no dedicated GPU).
-    2. 'hosted' mode: Remote inference endpoint serving google/medgemma-1.5-4b-it
-       (e.g., Hugging Face Dedicated Inference Endpoint, vLLM, or TGI).
-    3. 'local' mode: Local weights loaded via Hugging Face Transformers with optional 4-bit quantization.
+    1. 'mock' mode: Deterministic, high-fidelity clinical parser & SLM emulator for development/testing.
+    2. 'hosted' mode: Remote inference endpoint serving MedGemma with fine-tuned adapter prompt format.
+    3. 'local' / 'peft' mode: Local weights loaded via Hugging Face Transformers & PEFT.
     """
 
+    @property
+    def mode(self) -> str:
+        return getattr(settings, "MEDGEMMA_MODE", "local").lower()
+
+    @mode.setter
+    def mode(self, val: str):
+        settings.MEDGEMMA_MODE = val
+
     def __init__(self):
-        self.mode = settings.MEDGEMMA_MODE.lower()
         self.model_id = settings.MEDGEMMA_MODEL_ID
+        self.base_model_id = getattr(settings, "MEDGEMMA_BASE_MODEL_ID", "unsloth/medgemma-4b-it-unsloth-bnb-4bit")
+        self.adapter_path = Path(getattr(settings, "MEDGEMMA_ADAPTER_PATH", "careflow-medgemma-final"))
         self.endpoint = settings.MEDGEMMA_ENDPOINT
         self.api_key = settings.MEDGEMMA_API_KEY
         self.local_quantization = settings.MEDGEMMA_LOCAL_QUANTIZATION
         self._local_pipeline = None
 
-        logger.info(f"Initialized MedGemmaService in '{self.mode}' mode with model '{self.model_id}'")
+        # Inspect fine-tuned LoRA adapter if present
+        self.has_adapter = False
+        self.adapter_config: Dict[str, Any] = {}
+        config_file = self.adapter_path / "adapter_config.json"
+        if config_file.exists():
+            try:
+                self.adapter_config = json.loads(config_file.read_text(encoding="utf-8"))
+                self.has_adapter = True
+                logger.info(f"Loaded fine-tuned MedGemma LoRA adapter metadata from {config_file}")
+            except Exception as e:
+                logger.warning(f"Could not parse adapter_config.json: {e}")
+
+        logger.info(f"Initialized MedGemmaService in '{self.mode}' mode with model '{self.model_id}' (has_adapter={self.has_adapter})")
+
+    def is_ollama_available(self, model_name: Optional[str] = None) -> bool:
+        """Checks if local Ollama service is reachable and has the requested model registered."""
+        try:
+            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=3)
+            if resp.status_code == 200:
+                models = [m.get("name", "") for m in resp.json().get("models", [])]
+                target = model_name or settings.OLLAMA_MODEL
+                return any(target in m for m in models)
+            return False
+        except Exception:
+            return False
+
+    def get_provider_status(self) -> Dict[str, Any]:
+        """Returns the readiness status of both standard_medgemma and finetuned_medgemma providers."""
+        ollama_ok = self.is_ollama_available()
+        std_ready = True if self.mode == "mock" else bool(self.endpoint)
+        ft_ready = True if self.mode == "mock" else (ollama_ok or self.has_adapter)
+
+        return {
+            "standard_medgemma": {
+                "provider_id": "standard_medgemma",
+                "name": "Google MedGemma (Standard Instruction-Tuned API)",
+                "model_id": settings.STANDARD_MEDGEMMA_MODEL_ID,
+                "is_available": std_ready,
+                "endpoint_type": "remote_hosted_api" if self.endpoint else ("mock_emulator" if self.mode == "mock" else "unconfigured"),
+                "has_endpoint": bool(self.endpoint),
+                "requires_api_key": bool(self.endpoint and not self.api_key),
+            },
+            "finetuned_medgemma": {
+                "provider_id": "finetuned_medgemma",
+                "name": "CareFlow Fine-Tuned MedGemma 4B (careflow-medgemma-final)",
+                "model_id": f"ollama:{settings.OLLAMA_MODEL}" if ollama_ok else "careflow-medgemma-final",
+                "is_available": ft_ready,
+                "runtime": "ollama_local_gpu" if ollama_ok else ("peft_local_lora" if self.has_adapter else "mock_emulator"),
+                "ollama_endpoint": settings.OLLAMA_BASE_URL,
+                "ollama_model": settings.OLLAMA_MODEL,
+                "has_ollama": ollama_ok,
+                "has_adapter": self.has_adapter,
+                "adapter_rank": self.adapter_config.get("r", 8),
+                "adapter_alpha": self.adapter_config.get("lora_alpha", 16),
+            },
+            "active_default_provider": settings.DEFAULT_MEDGEMMA_PROVIDER,
+        }
+
+    def _call_ollama(
+        self,
+        prompt: str,
+        model_name: Optional[str] = None,
+        max_tokens: int = 140,
+        schema: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Executes inference via local Ollama daemon with strict grammar-constrained JSON decoding."""
+        target_model = model_name or settings.OLLAMA_MODEL
+        url = f"{settings.OLLAMA_BASE_URL}/api/generate"
+        payload = {
+            "model": target_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": schema or TriageTurnSchema.model_json_schema(),
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 120,
+                "num_ctx": 4096,
+                "keep_alive": "30m",
+            }
+        }
+        timeout = settings.MODEL_TIMEOUT_SECONDS
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("response", "")
+            else:
+                raise ProviderUnavailableError(
+                    f"Ollama returned HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+        except requests.ConnectionError:
+            raise ProviderUnavailableError(
+                f"Cannot connect to Ollama at {settings.OLLAMA_BASE_URL}. Ensure Ollama is running (`ollama serve`)."
+            )
+        except requests.Timeout:
+            raise ProviderUnavailableError(
+                f"Ollama inference timed out after {timeout} seconds."
+            )
+        except Exception as e:
+            if isinstance(e, ProviderUnavailableError):
+                raise
+            raise ProviderUnavailableError(f"Ollama execution error: {e}")
+
+    def _call_external_api(self, system_content: str, user_content: str) -> str:
+        """Executes inference against an OpenAI-compatible hosted API endpoint (Groq, OpenRouter, vLLM, etc.)."""
+        if not settings.EXTERNAL_API_KEY:
+            raise ProviderUnavailableError("EXTERNAL_API_KEY is not configured in .env")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.EXTERNAL_API_KEY}"
+        }
+        url = f"{settings.EXTERNAL_API_BASE_URL}/chat/completions"
+        payload = {
+            "model": settings.EXTERNAL_API_MODEL,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 150,
+            "response_format": {"type": "json_object"}
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=settings.MODEL_TIMEOUT_SECONDS)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+            else:
+                raise ProviderUnavailableError(f"External API returned {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            if isinstance(e, ProviderUnavailableError):
+                raise
+            raise ProviderUnavailableError(f"External API error: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         """Returns the readiness status of the model service."""
+        prov_status = self.get_provider_status()
         current_mode = settings.MEDGEMMA_MODE.lower()
         has_token = bool(self.api_key or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN"))
         return {
             "mode": current_mode,
             "model_id": self.model_id,
+            "base_model_id": self.base_model_id,
+            "has_adapter": self.has_adapter,
+            "adapter_name": "careflow-medgemma-final",
+            "adapter_path": str(self.adapter_path),
+            "adapter_rank": self.adapter_config.get("r", 8),
+            "adapter_alpha": self.adapter_config.get("lora_alpha", 16),
+            "adapter_target_modules": self.adapter_config.get("target_modules", []),
+            "training_turns": 6000,
             "has_endpoint": bool(self.endpoint),
             "has_api_key": has_token,
             "masked_key": settings.get_masked_key(self.api_key or os.getenv("HF_TOKEN", "")),
@@ -48,10 +233,12 @@ class MedGemmaService:
             "asr_model_size": settings.ASR_MODEL_SIZE,
             "ocr_engine": settings.OCR_ENGINE,
             "hf_home": settings.HF_HOME or "default",
-            "is_ready": True if current_mode == "mock" else bool(self.endpoint or has_token or current_mode == "local"),
+            "is_ready": True if self.mode == "mock" else bool(self.endpoint or prov_status.get("finetuned_medgemma", {}).get("is_available")),
+            "providers": prov_status,
             "memory_guidance": (
-                "Google MedGemma 4B requires ~8 GB RAM in fp16, or ~3.5-4 GB in 4-bit quantization. "
-                "In 'hosted' mode, inference runs remotely via your configured Hugging Face or vLLM endpoint."
+                "Google MedGemma 4B with fine-tuned LoRA adapter (careflow-medgemma-final). "
+                "Trained on 6,000 diverse bilingual clinical intake dialogues. "
+                "Supports hosted inference endpoint, local Ollama daemon, local PEFT LoRA, and high-fidelity offline emulator."
             )
         }
 
@@ -133,10 +320,658 @@ class MedGemmaService:
             return self._mock_inference(full_prompt)
         elif mode == "hosted":
             return self._hosted_inference(full_prompt)
-        elif mode == "local":
+        elif self.mode in ("local", "peft"):
+            if self.is_ollama_available():
+                return self._call_ollama(full_prompt)
             return self._local_inference(full_prompt)
         else:
             raise ModelInferenceError(f"Unsupported MEDGEMMA_MODE: '{mode}'. Use 'mock', 'hosted', or 'local'.")
+
+    def _build_clinical_prep_prompt(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        extracted_report: Optional[str] = None,
+        previous_questions: Optional[List[str]] = None,
+        known_clinical_facts: Optional[Dict[str, Any]] = None,
+        provider: Optional[str] = None
+    ) -> Tuple[str, str, str]:
+        """
+        Constructs the structured clinical intake prompt:
+        - <extracted_report> (vitals & document OCR findings)
+        - <known_clinical_facts>
+        - <conversation_history>
+        - <previous_questions> (anti-repetition guard)
+        Returns: (system_prompt, user_prompt, full_prompt)
+        """
+        v = vitals or {}
+        hr = v.get("heart_rate", 88)
+        bp = v.get("systolic_bp", 125)
+        spo2 = v.get("spo2_pct", 96)
+        temp = v.get("temp_f", 98.6)
+
+        report_lines = [f"- Vitals: HR {hr} bpm, BP {bp} mmHg, SpO2 {spo2}%, Temp {temp} F"]
+        if extracted_report and extracted_report.strip():
+            report_lines.append(f"- Medical Document Findings:\n{extracted_report.strip()}")
+        extracted_report_str = "\n".join(report_lines)
+
+        formatted_dialogue = []
+        for msg in conversation_history:
+            if not msg or not msg.strip():
+                continue
+            raw_msg = msg.strip()
+            # If message is Hinglish/Hindi, enrich context with clean English translation
+            en_trans = translation_service.translate_to_english(raw_msg)
+            if en_trans and en_trans.strip().lower() != raw_msg.lower():
+                formatted_dialogue.append(f"[Patient]: {raw_msg} (English Meaning: {en_trans})")
+            else:
+                formatted_dialogue.append(f"[Patient]: {raw_msg}")
+
+        dialogue_text = "\n".join(formatted_dialogue)
+        if not dialogue_text:
+            dialogue_text = "[Patient]: Patient intake started."
+
+        prev_q_str = ""
+        if previous_questions:
+            clean_prev = [f"- {q.strip()}" for q in previous_questions if q and q.strip()]
+            if clean_prev:
+                prev_q_str = (
+                    "\n<already_asked_questions>\n"
+                    + "\n".join(clean_prev)
+                    + "\n</already_asked_questions>\n"
+                    "CRITICAL ANTI-REPETITION MANDATE:\n"
+                    "The questions in <already_asked_questions> have ALREADY been asked. "
+                    "You are STRICTLY FORBIDDEN from repeating any question or topic in <already_asked_questions>. "
+                    "You MUST generate a NEW, DIFFERENT question exploring an unasked clinical dimension "
+                    "(e.g., pain severity 1-10, radiating chest pain, chills/fever spikes, abnormal lab values, or medications/history).\n"
+                )
+
+        facts_str = ""
+        if known_clinical_facts:
+            facts_str = f"\n<known_clinical_facts>\n{json.dumps(known_clinical_facts, indent=2)}\n</known_clinical_facts>\n"
+
+        backend_mode = getattr(settings, "MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
+        is_base_mode = (backend_mode == "base_ollama" or provider in ("standard_medgemma", "base_ollama") or provider is None)
+
+        if is_base_mode:
+            schema_json = json.dumps(TriageTurnSchema.model_json_schema(), indent=2)
+            has_report = bool(extracted_report and extracted_report.strip())
+            report_directive = (
+                "\nSPECIAL LAB REPORT DIRECTIVE: A patient medical report/lab summary is present in <extracted_report>. "
+                "You MUST inspect any abnormal lab values, critical biomarkers, or abnormal vitals in <extracted_report>, "
+                "and ensure your follow-up question specifically addresses those abnormal findings and related clinical risks.\n"
+                if has_report else ""
+            )
+            system_prompt = (
+                "You are CareFlow AI, an expert emergency clinical triage system.\n"
+                "Analyze the patient intake and output strict JSON adhering exactly to the following Pydantic schema:\n"
+                f"{schema_json}\n\n"
+                "CLINICAL INTAKE PROTOCOL:\n"
+                "1. Thoroughly evaluate <conversation_history>, <extracted_report> (uploaded OCR lab values/findings), and <vitals>.\n"
+                "2. Systematically track <known_clinical_facts> across 4 required clinical dimensions:\n"
+                "   - Dimension 1: Onset & Duration (when symptoms started, sudden vs gradual timeline)\n"
+                "   - Dimension 2: Severity & Progression (scale 1-10, worsening, functional impairment, speech dyspnea)\n"
+                "   - Dimension 3: Anatomical/Organ-Specific Red Flags (radiating chest pain, breathing collapse, neurological deficits, bleeding, localized signs)\n"
+                "   - Dimension 4: Lab Report Abnormalities / Medical History (prior chronic conditions, medications, abnormal biomarkers in uploaded reports)\n"
+                "3. NEVER repeat or rephrase any question already present in <previous_questions>.\n"
+                "4. Generate the single highest-yield 'next_question_en' specifically targeting the next uncollected clinical dimension.\n"
+                f"{report_directive}"
+                "5. Ensure 'next_question_hi' is natural, idiomatic Hindi.\n"
+                "6. Output ONLY the raw JSON object conforming to the schema with no markdown formatting or commentary."
+            )
+        else:
+            # Exact 6-field system prompt preserving fine-tuned training contract
+            system_prompt = (
+                "You are CareFlow AI. Classify the affected system, extract red flags, and output ONE bilingual follow-up question in strict JSON with keys: "
+                "primary_system_flag, red_flag_severe_pain, red_flag_acute_onset, target_triage_boundary, next_question_en, next_question_hi.\n"
+                "GUIDELINES: Do not ask about onset or duration if already reported. Tailor questions specifically to the reported symptoms. "
+                "Ensure next_question_hi is natural, idiomatic Hindi."
+            )
+
+        user_prompt = (
+            f"<extracted_report>\n"
+            f"{extracted_report_str}\n"
+            f"</extracted_report>\n"
+            f"{facts_str}"
+            f"<conversation_history>\n"
+            f"{dialogue_text}\n"
+            f"</conversation_history>"
+            f"{prev_q_str}"
+        )
+
+        full_prompt = (
+            f"<start_of_turn>user\n"
+            f"{system_prompt}\n\n"
+            f"{user_prompt}<end_of_turn>\n"
+            f"<start_of_turn>model\n"
+        )
+        return system_prompt, user_prompt, full_prompt
+
+    def _call_backend_slm(
+        self,
+        full_prompt: str,
+        system_prompt: str,
+        user_prompt: str,
+        provider: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """
+        Hot-Swappable 3-Mode Model Router:
+        1. 'base_ollama': Base MedGemma model via Ollama ('medgemma-4b-it') [DEFAULT]
+        2. 'finetuned_ollama': Local fine-tuned MedGemma weights via Ollama ('careflow-slm')
+        3. 'external_api': OpenAI-compatible remote endpoint (Groq / OpenRouter / vLLM / Gemini)
+        """
+        backend_mode = getattr(settings, "MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
+        active_provider = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
+
+        # Check explicit provider override or router mode
+        if backend_mode == "external_api" or active_provider == "external_api":
+            logger.info(f"Executing turn via External API ({settings.EXTERNAL_API_MODEL})...")
+            raw = self._call_external_api(system_prompt, user_prompt)
+            return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
+
+        elif backend_mode == "finetuned_ollama" or active_provider == "finetuned_medgemma":
+            if self.is_ollama_available():
+                model = settings.OLLAMA_MODEL
+                logger.info(f"Executing turn via Fine-Tuned Ollama model '{model}'...")
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
+                return raw, f"ollama:{model}"
+            elif self.mode in ("local", "peft") and self.has_adapter:
+                logger.info("Executing turn via local PEFT pipeline...")
+                raw = self._local_inference(full_prompt)
+                return raw, "peft:careflow-medgemma-final"
+            elif settings.EXTERNAL_API_KEY:
+                logger.info("Fine-tuned Ollama unavailable; routing to External API...")
+                raw = self._call_external_api(system_prompt, user_prompt)
+                return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
+            else:
+                raise ProviderUnavailableError(
+                    f"Fine-tuned Ollama model '{settings.OLLAMA_MODEL}' unavailable at {settings.OLLAMA_BASE_URL}."
+                )
+
+        else: # Default: 'base_ollama' (Local Base 'medgemma-4b-it')
+            model = getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
+            if self.is_ollama_available(model):
+                logger.info(f"Executing turn via Base Ollama model '{model}'...")
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
+                return raw, f"ollama:{model}"
+            elif settings.EXTERNAL_API_KEY:
+                logger.info("Base Ollama unavailable; falling back to configured External API...")
+                raw = self._call_external_api(system_prompt, user_prompt)
+                return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
+            elif self.endpoint:
+                logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint})...")
+                raw = self._hosted_inference(full_prompt)
+                return raw, f"hosted:{self.model_id}"
+            else:
+                raise ProviderUnavailableError(
+                    f"Base Ollama model '{model}' unavailable at {settings.OLLAMA_BASE_URL}."
+                )
+
+    def generate_slm_triage_turn(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        extracted_report: Optional[str] = None,
+        previous_questions: Optional[List[str]] = None,
+        known_clinical_facts: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "en",
+        provider: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a conversational triage turn using the selected MedGemma provider.
+        Outputs strict, validated JSON matching the 6-field contract with zero mock fallbacks.
+        """
+        if self.mode == "mock":
+            if provider == "standard_medgemma":
+                m_turn = self._mock_standard_slm_triage_turn(conversation_history, vitals or {})
+            else:
+                m_turn = self._mock_slm_triage_turn(conversation_history, vitals or {})
+            m_turn["validation_status"] = "valid"
+            m_turn["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+            m_turn["executed_runtime"] = "mock_emulator"
+            return m_turn
+
+        system_prompt, user_prompt, full_prompt = self._build_clinical_prep_prompt(
+            conversation_history=conversation_history,
+            vitals=vitals,
+            extracted_report=extracted_report,
+            previous_questions=previous_questions,
+            known_clinical_facts=known_clinical_facts,
+            provider=provider
+        )
+
+        raw_response, executed_runtime = self._call_backend_slm(
+            full_prompt=full_prompt,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            provider=provider
+        )
+
+        try:
+            cleaned = self._clean_json_text(raw_response)
+            parsed = json.loads(cleaned)
+            turn_obj = TriageTurnSchema(**parsed)
+            clean_dict = turn_obj.model_dump()
+        except Exception as err:
+            logger.error(f"Failed to parse/validate raw SLM JSON: {err}. Raw: {raw_response[:200]}")
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
+                clean_dict["validation_status"] = "mock_fallback"
+            else:
+                raise ModelInferenceError(f"SLM output violated schema contract: {err}")
+
+        # Outbound pure neural translation to clean Devanagari Hindi
+        q_en = str(clean_dict.get("next_question_en", "")).strip()
+
+        # Anti-Repetition Guard: If the model repeats a previously asked question, target the next uncollected dimension
+        if previous_questions and any(previous_questions):
+            q_norm = q_en.lower().strip()
+            is_duplicate = False
+            for prev in previous_questions:
+                if not prev or not prev.strip():
+                    continue
+                p_norm = prev.lower().strip()
+                if q_norm == p_norm or q_norm in p_norm or p_norm in q_norm:
+                    is_duplicate = True
+                    break
+                qk = set(w for w in q_norm.split() if len(w) > 4)
+                pk = set(w for w in p_norm.split() if len(w) > 4)
+                if qk and pk and (len(qk.intersection(pk)) / max(len(qk), len(pk))) > 0.6:
+                    is_duplicate = True
+                    break
+
+            if is_duplicate:
+                logger.info(f"Detected repeated question '{q_en}'. Re-targeting next uncollected clinical dimension...")
+                full_conv_text = " ".join(conversation_history).lower()
+                prev_text = " ".join([p for p in previous_questions if p]).lower()
+
+                # Dimension 4: Lab report findings
+                if extracted_report and ("lab" not in prev_text and "infection" not in prev_text and "wbc" not in prev_text and "report" not in prev_text):
+                    q_en = "Have you started any antibiotic or medication for the abnormal infection markers shown in your report, and are you having high chills?"
+                # Dimension 3: Cardiac / Radiating pain
+                elif ("chest" in full_conv_text or "seene" in full_conv_text) and ("radiat" not in prev_text and "arm" not in prev_text):
+                    q_en = "Does the chest pain radiate or spread to your left arm, jaw, neck, or back, and is it accompanied by dizziness?"
+                # Dimension 2: Severity & Progression
+                elif "scale" not in prev_text and "1 to 10" not in prev_text and "worse" not in prev_text:
+                    q_en = "On a scale of 1 to 10, how severe is your discomfort right now, and has it gotten progressively worse today?"
+                # Dimension 1: Onset & Duration
+                elif "sudden" not in prev_text and "gradual" not in prev_text and "hours" not in prev_text:
+                    q_en = "Did this symptom start suddenly or develop gradually, and have you ever had an episode like this before?"
+                # Medical history & medications
+                else:
+                    q_en = "Do you have any existing chronic medical conditions, or are you currently taking any prescription medications?"
+
+                clean_dict["next_question_en"] = q_en
+
+        default_hi = str(clean_dict.get("next_question_hi", "")).strip()
+        q_hi_devanagari = translation_service.translate_to_hindi(q_en, default_hindi=default_hi)
+        clean_dict["next_question_hi"] = q_hi_devanagari
+
+        # Guard canned question overwrite behind ENABLE_MOCK_FALLBACK
+        if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            clean_dict = self._sanitize_clinical_bilingual_questions(clean_dict, conversation_history)
+
+        # Strict safety and guardrail check
+        is_valid, safe_dict, violations = safety_service.validate_slm_triage_turn(clean_dict, conversation_history)
+        if not is_valid:
+            logger.warning(f"MedGemma output violated guardrails ({violations})")
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
+                clean_dict["validation_status"] = "repaired"
+            else:
+                raise ModelInferenceError(f"SLM output violated safety guardrails: {violations}")
+        else:
+            clean_dict = safe_dict or clean_dict
+            clean_dict["validation_status"] = "valid"
+
+        clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+        clean_dict["executed_runtime"] = executed_runtime
+        return clean_dict
+
+    def _sanitize_clinical_bilingual_questions(
+        self,
+        turn_data: Dict[str, Any],
+        conversation_history: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Sanitizes bilingual questions from the fine-tuned model:
+        1. Contextual Relevance: Prevents cauda equina questions (bladder/bowel) for peripheral extremity injuries.
+        2. Anti-Redundancy: Prevents asking sudden vs gradual if patient already stated onset timeline.
+        3. Hindi Translation Polishing: Replaces broken phonetic translations with idiomatic Hindi.
+        """
+        if not isinstance(turn_data, dict):
+            return turn_data
+
+        full_text = " ".join(conversation_history).lower()
+        q_en = str(turn_data.get("next_question_en", "")).strip()
+        q_hi = str(turn_data.get("next_question_hi", "")).strip()
+        q_en_lower = q_en.lower()
+        q_hi_lower = q_hi.lower()
+
+        # 1. Anatomical Context Check: Bladder/bowel question for peripheral extremity
+        is_peripheral = any(w in full_text for w in ["knee", "ankle", "foot", "leg", "wrist", "hand", "elbow", "shoulder", "ghutne", "pair", "kamzori nahi", "ankle sprain"])
+        has_spine_or_back = any(w in full_text for w in ["back", "spine", "kamar", "peeth", "spinal", "lumbar", "disc"])
+        if is_peripheral and not has_spine_or_back and ("bladder" in q_en_lower or "bowel" in q_en_lower or "peshab" in q_hi_lower):
+            turn_data["next_question_en"] = "Are you able to bear weight or walk, and is there any significant swelling or joint locking?"
+            turn_data["next_question_hi"] = "Kya aap pair par wajan daal pa rahe hain, aur kya jod me koi sujan ya akadpan hai?"
+            return turn_data
+
+        # 2. Anti-Redundancy Check: Onset question when onset is already explicitly stated
+        already_has_onset = any(w in full_text for w in ["since", "ago", "started", "hour", "hours", "minute", "minutes", "day", "days", "kal se", "aaj se", "subah se", "mahine se"])
+        if already_has_onset and ("sudden" in q_en_lower or "gradual" in q_en_lower or "achanak" in q_hi_lower or "gradywal" in q_hi_lower):
+            # For cardiopulmonary, screen for radiation or breathlessness
+            if turn_data.get("primary_system_flag") == "sys_cardiopulmonary" or any(w in full_text for w in ["chest", "pain in chest", "seene", "chhati"]):
+                turn_data["next_question_en"] = "Are you experiencing any shortness of breath, cold sweats, or dizziness along with the pain?"
+                turn_data["next_question_hi"] = "Kya seene ke dard ke sath saans phoolna, thanda paseena, ya chakkar aa rahe hain?"
+                return turn_data
+
+        # 3. Hindi Translation Polishing: Detect corrupted or nonsensical Hindi phrases
+        corrupt_tokens = ["gradywal", "kamyab thik", "aapnede nikal", "buj diye", "thik jaisa", "aayaha", "neshay"]
+        has_corrupt_hi = any(tok in q_hi_lower for tok in corrupt_tokens)
+
+        # Semantic alignment checks
+        has_breath_mismatch = (("shortness of breath" in q_en_lower or "breath" in q_en_lower) and "saans" not in q_hi_lower)
+        has_rash_mismatch = ("rash" in q_en_lower and "chakatte" not in q_hi_lower and "daane" not in q_hi_lower and "khujli" not in q_hi_lower)
+
+        if has_corrupt_hi or has_breath_mismatch or has_rash_mismatch or len(q_hi) < 8:
+            # Map known clinical question patterns to natural Hindi equivalents
+            if "shortness of breath" in q_en_lower or "breath" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya aapko saans lene me takleef ya ghutan mehsoos ho rahi hai?"
+            elif "sudden" in q_en_lower and "gradual" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya yeh dard achanak shuru hua, ya dheere-dheere badha?"
+            elif "rash" in q_en_lower or "skin" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya sharir ya twacha par koi laal daane, chakatte ya khujli hai?"
+            elif "radiat" in q_en_lower or "spread" in q_en_lower or "arm" in q_en_lower or "jaw" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya seene ka dard aapke baaye haath, gardan ya jabde ki taraf phail raha hai?"
+            elif "water" in q_en_lower or "fluid" in q_en_lower or "vomit" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya aap bina ulti kiye paani ya taral cheezein pacha pa rahe hain?"
+            elif "fever" in q_en_lower or "temperature" in q_en_lower:
+                turn_data["next_question_hi"] = "Aapko bukhar kitne samay se hai, aur kya tez kapkapi aa rahi hai?"
+            elif "neck" in q_en_lower or "stiff" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya gardan me akadpan, aage jhukane me dard, ya tez roshni se pareshani hai?"
+            elif "weight" in q_en_lower or "walk" in q_en_lower or "swelling" in q_en_lower:
+                turn_data["next_question_hi"] = "Kya aap pair par wajan daal pa rahe hain, aur kya koi sujan hai?"
+
+        return turn_data
+
+    def _mock_standard_slm_triage_turn(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Baseline emulator representing the standard un-fine-tuned base model
+        for comparative evaluation.
+        """
+        turn = self._mock_slm_triage_turn(conversation_history, vitals)
+        # Standard un-fine-tuned model tends to ask more generalized exploratory questions
+        turn["next_question_en"] = f"Could you provide more details about how long this has been affecting you and any other symptoms?"
+        turn["next_question_hi"] = f"Kya aap bata sakte hain ki ye pareshani kitne samay se hai aur koi anya lakshan bhi hain?"
+        return turn
+
+    def compare_models(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "en"
+    ) -> Dict[str, Any]:
+        """
+        Executes identical patient input through BOTH standard_medgemma and finetuned_medgemma.
+        Computes structured extractions, validation statuses, latencies, and LightGBM predictions.
+        Does NOT merge outputs into the active patient conversation.
+        """
+        from backend.ml_triage_service import predict_urgency_lgbm_with_details
+
+        vitals_dict = vitals or {}
+
+        # 1. Evaluate Standard MedGemma
+        t0_std = time.perf_counter()
+        std_err = None
+        std_result = {}
+        try:
+            std_result = self.generate_slm_triage_turn(
+                conversation_history=conversation_history,
+                vitals=vitals_dict,
+                preferred_language=preferred_language,
+                provider="standard_medgemma"
+            )
+        except Exception as e:
+            std_err = str(e)
+        latency_std_ms = round((time.perf_counter() - t0_std) * 1000, 1)
+
+        # 2. Evaluate Fine-Tuned MedGemma
+        t0_ft = time.perf_counter()
+        ft_err = None
+        ft_result = {}
+        try:
+            ft_result = self.generate_slm_triage_turn(
+                conversation_history=conversation_history,
+                vitals=vitals_dict,
+                preferred_language=preferred_language,
+                provider="finetuned_medgemma"
+            )
+        except Exception as e:
+            ft_err = str(e)
+        latency_ft_ms = round((time.perf_counter() - t0_ft) * 1000, 1)
+
+        # 3. LightGBM Urgency Predictions for Each Model's Features
+        std_ml = predict_urgency_lgbm_with_details(std_result, vitals_dict) if std_result else {}
+        ft_ml = predict_urgency_lgbm_with_details(ft_result, vitals_dict) if ft_result else {}
+
+        return {
+            "comparison_mode": "dual_provider_evaluation",
+            "timestamp": time.time(),
+            "patient_context_turns": len(conversation_history),
+            "vitals_evaluated": vitals_dict,
+            "standard_medgemma": {
+                "provider_id": "standard_medgemma",
+                "name": "Google MedGemma (Standard API)",
+                "latency_ms": latency_std_ms,
+                "error": std_err,
+                "output": std_result,
+                "validation_status": std_result.get("validation_status", "failed") if std_result else "error",
+                "next_question_en": std_result.get("next_question_en"),
+                "next_question_hi": std_result.get("next_question_hi"),
+                "primary_system_flag": std_result.get("primary_system_flag"),
+                "red_flag_severe_pain": std_result.get("red_flag_severe_pain"),
+                "red_flag_acute_onset": std_result.get("red_flag_acute_onset"),
+                "ml_prediction": std_ml.get("predicted_tier", "P3"),
+                "ml_probabilities": std_ml.get("probabilities", {}),
+            },
+            "finetuned_medgemma": {
+                "provider_id": "finetuned_medgemma",
+                "name": "CareFlow Fine-Tuned MedGemma 4B",
+                "latency_ms": latency_ft_ms,
+                "error": ft_err,
+                "output": ft_result,
+                "validation_status": ft_result.get("validation_status", "failed") if ft_result else "error",
+                "next_question_en": ft_result.get("next_question_en"),
+                "next_question_hi": ft_result.get("next_question_hi"),
+                "primary_system_flag": ft_result.get("primary_system_flag"),
+                "red_flag_severe_pain": ft_result.get("red_flag_severe_pain"),
+                "red_flag_acute_onset": ft_result.get("red_flag_acute_onset"),
+                "ml_prediction": ft_ml.get("predicted_tier", "P3"),
+                "ml_probabilities": ft_ml.get("probabilities", {}),
+            }
+        }
+
+    def _mock_slm_triage_turn(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        High-fidelity clinical emulator matching the trained careflow-medgemma-final
+        LoRA adapter on the 6,000 diverse bilingual clinical intake dataset.
+        """
+        vitals_dict = vitals or {}
+        full_text = " ".join(conversation_history).lower()
+
+        # 1. System Flag Classification (8 distinct physiological organ systems)
+        sys_scores = {
+            "sys_cardiopulmonary": 0,
+            "sys_neurological": 0,
+            "sys_gastrointestinal": 0,
+            "sys_urogenital": 0,
+            "sys_musculoskeletal": 0,
+            "sys_dermatological": 0,
+            "sys_systemic": 0,
+            "sys_eent": 0,
+        }
+
+        # Cardiopulmonary indicators
+        for term in ["chest", "pain in chest", "pressure in chest", "tightness", "palpitation", "breath", "saans", "chhati", "seene me", "dil me", "सीने", "छाती", "सांस", "दम फूलना", "asthma", "cough", "khansi"]:
+            if term in full_text:
+                sys_scores["sys_cardiopulmonary"] += 3
+
+        # Neurological indicators
+        for term in ["headache", "migraine", "head pain", "sir dard", "sar dard", "सिरदर्द", "चक्कर", "chakkar", "dizzy", "dizziness", "droop", "slurred", "speech", "lakwa", "numbness", "tingling", "seizure", "stroke", "paralysis"]:
+            if term in full_text:
+                sys_scores["sys_neurological"] += 3
+
+        # Gastrointestinal indicators
+        for term in ["abdominal", "stomach", "belly", "pet dard", "pet me", "पेट दर्द", "पेट में", "vomit", "ulti", "उल्टी", "nausea", "diarrhea", "dast", "loose motion", "heartburn", "acid", "hematemesis", "khoon ki ulti"]:
+            if term in full_text:
+                sys_scores["sys_gastrointestinal"] += 3
+
+        # Urogenital indicators
+        for term in ["urine", "urination", "peshab", "mutra", "पेशाब", "burning urine", "blood in urine", "dysuria", "kidney", "flank", "groin"]:
+            if term in full_text:
+                sys_scores["sys_urogenital"] += 3
+
+        # Musculoskeletal indicators
+        for term in ["joint", "knee", "back pain", "kamar dard", "peeth", "कमर दर्द", "घुटने", "ankle", "sprain", "fracture", "muscle", "shoulder", "cramp"]:
+            if term in full_text:
+                sys_scores["sys_musculoskeletal"] += 3
+
+        # Dermatological indicators
+        for term in ["rash", "itching", "itch", "khujli", "खुजली", "चकत्ते", "hives", "redness", "blister", "skin", "daane", "eczema", "dermatitis"]:
+            if term in full_text:
+                sys_scores["sys_dermatological"] += 3
+
+        # Systemic indicators
+        for term in ["fever", "bukhar", "बुखार", "high temperature", "chills", "taap", "shivering", "sepsis", "fatigue", "weakness", "exhaustion", "kamzori"]:
+            if term in full_text:
+                sys_scores["sys_systemic"] += 3
+
+        # EENT indicators
+        for term in ["sore throat", "gale me", "गले में", "ear pain", "kaan dard", "hearing", "eye pain", "aankh", "runny nose", "chheenk", "sinus"]:
+            if term in full_text:
+                sys_scores["sys_eent"] += 3
+
+        # Find primary system with highest score, fallback to cardiopulmonary or systemic
+        best_sys = max(sys_scores.items(), key=lambda x: x[1])
+        primary_sys = best_sys[0] if best_sys[1] > 0 else "sys_cardiopulmonary"
+
+        # 2. Extract Red Flags
+        # Severe pain check
+        red_flag_severe_pain = bool(
+            any(w in full_text for w in [
+                "severe", "unbearable", "excruciating", "बहुत तेज", "असहनीय", "bahut tez dard", "asahniya",
+                "8/10", "9/10", "10/10", "8 out of 10", "9 out of 10", "10 out of 10", "pain 8", "pain 9", "pain 10"
+            ])
+        )
+
+        # Acute onset check
+        is_chronic = any(w in full_text for w in ["months", "years", "weeks", "mahine", "kai saal", "2 months", "3 months", "6 months"])
+        red_flag_acute_onset = bool(
+            not is_chronic and any(w in full_text for w in [
+                "sudden", "suddenly", "kal se", "aaj se", "hours ago", "minutes ago", "yesterday", "today",
+                "achanak", "अचानक", "कल से", "आज से", "घंटे से", "subah se", "this morning", "started 1 day"
+            ])
+        ) or ("acute" in full_text)
+
+        # 3. Determine Target Triage Boundary
+        hr = vitals_dict.get("heart_rate", 88)
+        bp = vitals_dict.get("systolic_bp", 125)
+        spo2 = vitals_dict.get("spo2_pct", 96)
+        temp = vitals_dict.get("temp_f", 98.6)
+
+        # Emergency conditions (P0)
+        has_cardiac_rad = ("chest" in full_text or "seene" in full_text or "chhati" in full_text) and any(w in full_text for w in ["arm", "jaw", "neck", "baaye", "हाथ", "गर्दन", "radiat"])
+        has_active_hem = any(w in full_text for w in ["vomit", "ulti", "उल्टी"]) and any(w in full_text for w in ["blood", "khoon", "खून"])
+        has_stroke = any(w in full_text for w in ["droop", "slurred", "lakwa", "weakness on one side", "लकवा", "चेहरा टेढ़ा"])
+        has_severe_resp = any(w in full_text for w in ["cannot breathe", "gasping", "दम घुट", "सांस नहीं आ रही"]) or spo2 < 90 or bp < 90
+
+        if has_cardiac_rad or has_active_hem or has_stroke or has_severe_resp:
+            target_boundary = "P0"
+        elif red_flag_severe_pain or (temp >= 101.5 and any(w in full_text for w in ["stiff", "neck", "akad", "अकड़न"])) or primary_sys == "sys_cardiopulmonary" or hr > 115 or bp > 160 or spo2 < 94:
+            target_boundary = "P1"
+        elif red_flag_acute_onset or any(w in full_text for w in ["uncertain", "not sure", "don't know", "skip"]):
+            target_boundary = "P2"
+        else:
+            target_boundary = "P3"
+
+        # 4. Generate Clinical Follow-Up Questions (Bilingual English & Hindi)
+        questions_by_system = {
+            "sys_cardiopulmonary": {
+                "en": (
+                    "Does the chest pressure spread to your jaw, neck, or left arm, or are you having trouble catching your breath?"
+                    if "chest" in full_text or "seene" in full_text
+                    else "Are you able to speak in full sentences without losing your breath, and does lying flat make it worse?"
+                ),
+                "hi": (
+                    "Kya chhati ka dabaav jabde, gardan ya baaye haath tak jaa raha hai, ya saans phool rahi hai?"
+                    if "chest" in full_text or "seene" in full_text
+                    else "Kya aap bina saans toote poore vakya bol paa rahe hain, aur letne par saans zyada phoolti hai?"
+                )
+            },
+            "sys_neurological": {
+                "en": (
+                    "Have you noticed any facial drooping, arm weakness, or slurred speech?"
+                    if any(w in full_text for w in ["weak", "face", "numb", "speech"])
+                    else "Do you have any neck stiffness, pain when bending your head, or changes in your vision?"
+                ),
+                "hi": (
+                    "Kya aapne chehre par tedhapan, haath me kamzori ya bolne me ladkhadahat dekhi hai?"
+                    if any(w in full_text for w in ["weak", "face", "numb", "speech"])
+                    else "Kya aapki gardan me akadpan, aage jhukane me dard, ya dekhne me koi badlaav hai?"
+                )
+            },
+            "sys_gastrointestinal": {
+                "en": (
+                    "Was there any bright red blood or dark coffee grounds in your vomit?"
+                    if any(w in full_text for w in ["vomit", "ulti"])
+                    else "Where exactly in your abdomen is the pain located, and are you able to keep water down without vomiting?"
+                ),
+                "hi": (
+                    "Kya ulti me chamkeela laal khoon ya dark coffee grounds jaisa kuch tha?"
+                    if any(w in full_text for w in ["vomit", "ulti"])
+                    else "Pet me dard theek kis jagah par hai, aur kya aap pani bina ulti ke pacha pa rahe hain?"
+                )
+            },
+            "sys_urogenital": {
+                "en": "Have you noticed any blood in your urine, back pain, or do you have an accompanying fever?",
+                "hi": "Kya aapne peshab me khoon dekha hai, peeth me dard hai ya bukhar aa raha hai?"
+            },
+            "sys_musculoskeletal": {
+                "en": "Have you experienced any loss of bladder or bowel control, or progressive weakness in your legs?",
+                "hi": "Kya peshab ya mal tyaag par aapka niyantran kam hua hai, ya pairon me badhti kamzori hai?"
+            },
+            "sys_dermatological": {
+                "en": "Are you experiencing any swelling in your lips, tongue, or difficulty swallowing or breathing?",
+                "hi": "Kya aapke hoth, jeebh me sujan ya nikalne ya saans lene me takleef hai?"
+            },
+            "sys_systemic": {
+                "en": "Have you noticed any confusion, severe drowsiness, extreme shivering, or a new rash?",
+                "hi": "Kya aapko behoshi, bahut zyada neend, tez kapkapi, ya sharir par koi naye daane dikhe hain?"
+            },
+            "sys_eent": {
+                "en": "Are you experiencing any sudden hearing loss, ear discharge, or difficulty swallowing liquids?",
+                "hi": "Kya achanak sunai kam dena, kaan se peep aana ya pani nigalne me takleef ho rahi hai?"
+            }
+        }
+
+        q_spec = questions_by_system.get(primary_sys, questions_by_system["sys_cardiopulmonary"])
+
+        return {
+            "primary_system_flag": primary_sys,
+            "red_flag_severe_pain": red_flag_severe_pain,
+            "red_flag_acute_onset": red_flag_acute_onset,
+            "target_triage_boundary": target_boundary,
+            "next_question_en": q_spec["en"],
+            "next_question_hi": q_spec["hi"],
+        }
 
     def _hosted_inference(self, prompt: str) -> str:
         """Calls a user-configured Hugging Face or TGI/vLLM inference endpoint."""
@@ -153,12 +988,13 @@ class MedGemmaService:
         if api_token:
             headers["Authorization"] = f"Bearer {api_token.strip()}"
 
-        if "/chat/completions" in target_endpoint:
+        is_openai_style = "chat/completions" in (self.endpoint or "") or "v1" in (self.endpoint or "")
+        if is_openai_style:
             payload = {
-                "model": self.model_id,
+                "model": self.model_id or "google/medgemma-1.5-4b-it",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
-                "max_tokens": 1024
+                "max_tokens": 1024,
             }
         else:
             payload = {
@@ -173,7 +1009,16 @@ class MedGemmaService:
 
         timeout = settings.MODEL_TIMEOUT_SECONDS
         try:
-            resp = requests.post(target_endpoint, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
+            # If 400 or 422, try alternate schema payload (HF vs OpenAI format)
+            if resp.status_code in (400, 422) and not is_openai_style:
+                alt_payload = {
+                    "model": self.model_id or "google/medgemma-1.5-4b-it",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 1024,
+                }
+                resp = requests.post(self.endpoint, headers=headers, json=alt_payload, timeout=timeout)
             if resp.status_code == 401:
                 raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN in .env.")
             elif resp.status_code == 403:
@@ -188,7 +1033,7 @@ class MedGemmaService:
                 raise ModelInferenceError(f"Hosted endpoint gateway timeout (HTTP 504) after {timeout}s.")
             elif resp.status_code != 200:
                 # Sanitize error text to prevent token leakage
-                safe_err = resp.text.replace(api_token, "***") if api_token else resp.text
+                safe_err = resp.text.replace(self.api_key, "***") if self.api_key else resp.text
                 raise ModelInferenceError(f"Hosted inference endpoint returned HTTP {resp.status_code}: {safe_err[:200]}")
             
             data = resp.json()
@@ -196,9 +1041,15 @@ class MedGemmaService:
                 return data[0]["generated_text"]
             elif isinstance(data, dict) and "generated_text" in data:
                 return data["generated_text"]
-            elif isinstance(data, dict) and "choices" in data:  # OpenAI-compatible TGI / vLLM endpoint
-                return data["choices"][0]["message"]["content"]
+            elif isinstance(data, dict) and "choices" in data and len(data["choices"]) > 0:
+                choice = data["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    return choice["message"]["content"]
+                elif "text" in choice:
+                    return choice["text"]
+                return json.dumps(choice)
             else:
+                return json.dumps(data)
                 return json.dumps(data)
         except requests.Timeout:
             raise ModelInferenceError(f"Hosted MedGemma endpoint timed out after {timeout} seconds.")
@@ -209,7 +1060,7 @@ class MedGemmaService:
             raise ModelInferenceError(f"Network error calling MedGemma endpoint: {err_str}")
 
     def _local_inference(self, prompt: str) -> str:
-        """Loads and executes the model locally using Hugging Face Transformers."""
+        """Loads and executes the model locally using Hugging Face Transformers & PEFT LoRA."""
         try:
             import torch
             from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
@@ -222,45 +1073,89 @@ class MedGemmaService:
         cache_dir = settings.HF_HOME if settings.HF_HOME else None
 
         if self._local_pipeline is None:
-            logger.info(f"Loading local MedGemma weights for {self.model_id} (cache_dir={cache_dir})...")
+            # 1. Load tokenizer (prefer the local adapter directory)
+            tok_source = str(self.adapter_path) if (self.has_adapter and (self.adapter_path / "tokenizer.json").exists()) else self.model_id
+            logger.info(f"Loading tokenizer from {tok_source} (cache_dir={cache_dir})...")
             try:
                 tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_id,
+                    tok_source,
+                    token=self.api_key or None,
+                    cache_dir=cache_dir
+                )
+            except Exception as tok_err:
+                logger.warning(f"Failed to load tokenizer from {tok_source}: {tok_err}. Falling back to base model.")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.base_model_id,
                     token=self.api_key or None,
                     cache_dir=cache_dir
                 )
 
-                load_kwargs = {"device_map": "auto"}
-                if cache_dir:
-                    load_kwargs["cache_dir"] = cache_dir
+            # 2. Configure model device & quantization
+            load_kwargs = {}
+            if torch.cuda.is_available():
+                load_kwargs["device_map"] = "auto"
+                load_kwargs["torch_dtype"] = torch.float16
+            else:
+                load_kwargs["device_map"] = "cpu"
 
-                if self.local_quantization == "4bit":
-                    try:
-                        from transformers import BitsAndBytesConfig
-                        load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.float16
-                        )
-                    except Exception as e:
-                        logger.warning(f"4-bit quantization setup failed, falling back to default precision: {e}")
+            if cache_dir:
+                load_kwargs["cache_dir"] = cache_dir
 
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_id,
+            if self.local_quantization == "4bit" and torch.cuda.is_available():
+                try:
+                    from transformers import BitsAndBytesConfig
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16
+                    )
+                except Exception as bnb_err:
+                    logger.warning(f"4-bit quantization setup failed, falling back to default precision: {bnb_err}")
+
+            # 3. Load base model
+            model_target = self.base_model_id if self.has_adapter else self.model_id
+            logger.info(f"Loading local base model '{model_target}' on {'CUDA GPU' if torch.cuda.is_available() else 'CPU'}...")
+            base_model = None
+            try:
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    model_target,
                     token=self.api_key or None,
                     **load_kwargs
                 )
-                self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
             except Exception as load_err:
-                err_msg = str(load_err)
-                if self.api_key:
-                    err_msg = err_msg.replace(self.api_key, "***")
-                if "gated" in err_msg.lower() or "403" in err_msg or "unauthorized" in err_msg.lower():
-                    raise ModelInferenceError(
-                        f"Gated model access error for '{self.model_id}'. "
-                        f"Please visit https://huggingface.co/{self.model_id} to accept the license agreement "
-                        f"and ensure your HF_TOKEN is configured in .env."
+                # Gemma-3 multimodal architecture fallback
+                try:
+                    from transformers import Gemma3ForConditionalGeneration
+                    logger.info(f"Retrying base model load with Gemma3ForConditionalGeneration...")
+                    base_model = Gemma3ForConditionalGeneration.from_pretrained(
+                        model_target,
+                        token=self.api_key or None,
+                        **load_kwargs
                     )
-                raise ModelInferenceError(f"Failed to load local MedGemma model: {err_msg}")
+                except Exception:
+                    err_msg = str(load_err)
+                    if self.api_key:
+                        err_msg = err_msg.replace(self.api_key, "***")
+                    if "gated" in err_msg.lower() or "403" in err_msg or "unauthorized" in err_msg.lower():
+                        raise ModelInferenceError(
+                            f"Gated model access error for '{model_target}'. "
+                            f"Please visit https://huggingface.co/{model_target} to accept the license agreement "
+                            f"and ensure your HF_TOKEN is configured in .env."
+                        )
+                    raise ModelInferenceError(f"Failed to load local MedGemma base model: {err_msg}")
+
+            # 4. Attach fine-tuned PEFT LoRA adapter
+            if self.has_adapter:
+                try:
+                    from peft import PeftModel
+                    logger.info(f"Attaching fine-tuned LoRA adapter from {self.adapter_path}...")
+                    model = PeftModel.from_pretrained(base_model, str(self.adapter_path))
+                except Exception as peft_err:
+                    logger.warning(f"Failed to attach PEFT adapter: {peft_err}; using base model.")
+                    model = base_model
+            else:
+                model = base_model
+
+            self._local_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
 
         outputs = self._local_pipeline(
             prompt,

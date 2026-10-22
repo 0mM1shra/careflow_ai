@@ -21,8 +21,15 @@ class CareFlowAPIClient:
         except Exception as e:
             return {"status": "offline", "error": str(e)}
 
-    def create_case(self, preferred_language: str = "English", chief_complaint: Optional[str] = None) -> Dict[str, Any]:
+    def create_case(
+        self,
+        preferred_language: str = "English",
+        chief_complaint: Optional[str] = None,
+        selected_model_provider: Optional[str] = None
+    ) -> Dict[str, Any]:
         payload = {"preferred_language": preferred_language, "chief_complaint": chief_complaint}
+        if selected_model_provider:
+            payload["selected_model_provider"] = selected_model_provider
         resp = requests.post(f"{self.base_url}/cases", json=payload, timeout=10)
         resp.raise_for_status()
         return resp.json()
@@ -70,7 +77,7 @@ class CareFlowAPIClient:
             "transcription_confidence": conf,
             "is_confirmed": is_confirmed
         }
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=20)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=45)
         resp.raise_for_status()
         return resp.json()
 
@@ -79,7 +86,8 @@ class CareFlowAPIClient:
         file_bytes: bytes,
         filename: str,
         language: Optional[str] = None,
-        model_size: Optional[str] = None
+        model_size: Optional[str] = None,
+        translate_to_english: bool = False
     ) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
         params = {}
@@ -87,9 +95,22 @@ class CareFlowAPIClient:
             params["language"] = language
         if model_size:
             params["model_size"] = model_size
+        if translate_to_english:
+            params["translate_to_english"] = "true"
         resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=45)
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                err_detail = resp.json().get("detail", resp.text)
+            except Exception:
+                err_detail = resp.text
+            raise RuntimeError(err_detail or f"HTTP {resp.status_code}")
         return resp.json()
+
+    def text_to_speech(self, text: str, model: Optional[str] = "aura-asteria-en") -> bytes:
+        payload = {"text": text, "model": model or "aura-asteria-en"}
+        resp = requests.post(f"{self.base_url}/text-to-speech", json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.content
 
     def preview_document_extraction(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
@@ -98,7 +119,7 @@ class CareFlowAPIClient:
         return resp.json()
 
     def get_next_question(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=20)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=45)
         resp.raise_for_status()
         return resp.json()
 
@@ -168,6 +189,55 @@ class CareFlowAPIClient:
     def upload_document(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
         resp = requests.post(f"{self.base_url}/cases/{case_id}/upload-document", files=files, timeout=40)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_model_providers(self) -> Dict[str, Any]:
+        """Fetches availability status of Standard MedGemma vs Fine-Tuned MedGemma."""
+        resp = requests.get(f"{self.base_url}/model-providers", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_case_model_provider(self, case_id: str, provider: str) -> Dict[str, Any]:
+        """Switches active MedGemma provider for the given case."""
+        payload = {"provider": provider}
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/model-provider", json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def compare_models(
+        self,
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "en"
+    ) -> Dict[str, Any]:
+        """Runs identical patient input through both standard and fine-tuned MedGemma side-by-side."""
+        payload = {
+            "conversation_history": conversation_history,
+            "vitals": vitals or {},
+            "preferred_language": preferred_language
+        }
+        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=45)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_ai_models_status(self) -> Dict[str, Any]:
+        resp = requests.get(f"{self.base_url}/ai-models/status", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def run_live_pipeline(
+        self,
+        text: str,
+        vitals: Optional[Dict[str, Any]] = None,
+        preferred_language: str = "English"
+    ) -> Dict[str, Any]:
+        payload = {
+            "text": text,
+            "vitals": vitals or {},
+            "preferred_language": preferred_language
+        }
+        resp = requests.post(f"{self.base_url}/ai-pipeline/run", json=payload, timeout=25)
         resp.raise_for_status()
         return resp.json()
 

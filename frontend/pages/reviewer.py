@@ -269,16 +269,19 @@ with col_queue:
     else:
         for c in filtered_cases:
             case_id = c["id"]
-            priority = c["priority_category"]
-            p_badge = render_priority_badge(priority)
+            final_prio = c.get("final_triage") or c.get("priority_category", "P3")
+            rule_prio = c.get("rule_based_triage", final_prio)
+            ml_prio = c.get("ml_model_triage", "P3")
+            p_badge = render_priority_badge(final_prio)
             chief = c["chief_complaint"] or "Chief complaint not provided"
             wait_min = c.get("waiting_minutes", 0.0)
             status_str = c["review_status"]
             s_badge = render_status_badge(status_str)
             
+            esc_flag = "🚨 Escalated" if c.get("escalation_applied") else ""
             missing_flag = "⚠️ Missing Info" if c["has_missing_info"] else ""
-            conflict_flag = "⚡ Conflict/Uncertainty" if c["has_uncertainty_or_conflict"] else ""
-            flags = " • ".join([f for f in [missing_flag, conflict_flag] if f])
+            conflict_flag = "⚡ Conflict" if c["has_uncertainty_or_conflict"] else ""
+            flags = " • ".join([f for f in [esc_flag, missing_flag, conflict_flag] if f])
 
             rule_t = c.get("rule_based_triage") or priority
             ml_t = c.get("ml_model_triage") or priority
@@ -290,8 +293,9 @@ with col_queue:
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                     <strong>{case_id}</strong>
                     <div style="display: flex; gap: 4px; align-items: center;">
-                        {render_rule_based_badge(rule_t)}
-                        {render_lgbm_badge(ml_t)}
+                        <span>{p_badge}</span>
+                        {render_lgbm_badge(ml_prio)}
+                        {render_rule_based_badge(rule_prio)}
                     </div>
                 </div>
                 <div style="font-size: 14px; color: #1E293B; margin-bottom: 4px;">{chief[:80]}</div>
@@ -361,14 +365,23 @@ with col_detail:
 
             # Top Status Bar
             c_prio = case_data.get("priority_category", "P3")
+            final_prio = case_data.get("final_triage") or c_prio
+            rule_prio = case_data.get("rule_based_triage", c_prio)
+            ml_prio = case_data.get("ml_model_triage", "P3")
+            escalation_applied = case_data.get("escalation_applied", False)
+            escalation_reason = case_data.get("escalation_reason")
+            prov_name = case_data.get("selected_model_provider", "finetuned_medgemma")
             rev_prio = case_data.get("reviewer_priority")
             review_st = case_data.get("review_status", "pending")
             ai_st = case_data.get("ai_status", "pending")
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
             decision_path = case_data.get("decision_path") or "model_urgency_reasoning"
+            ml_details = case_data.get("ml_details") or {}
+            model_status = ml_details.get("model_status", "available")
+            imputed_feats = ml_details.get("imputed_features") or []
 
-            rule_t = case_data.get("rule_based_triage") or c_prio
-            ml_t = case_data.get("ml_model_triage") or c_prio
+            rule_t = rule_prio
+            ml_t = ml_prio
             is_concordant = (rule_t == ml_t)
             concordance_badge = (
                 '<span style="background-color: #ECFDF5; color: #065F46; border: 1px solid #6EE7B7; padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">✅ Models Concordant</span>'
@@ -377,21 +390,92 @@ with col_detail:
             )
 
             st.markdown(f"""
-            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;">
-                {render_priority_badge(c_prio)}
-                {render_rule_based_badge(rule_t)}
-                {render_lgbm_badge(ml_t)}
-                {concordance_badge}
-                {render_decision_path_badge(decision_path)}
-                {render_status_badge(review_st)}
-                <span style="font-size: 13px; color: #475569;">
-                    Protocol: <code>{rule_ver}</code> | AI Engine: <code>MedGemma ({ai_st})</code>
-                </span>
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; padding: 14px 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px;">
+                <div style="flex: 1; min-width: 180px;">
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #1E293B; display: block; margin-bottom: 4px;">🎯 Final Guarded Decision</span>
+                    {render_priority_badge(final_prio)}
+                </div>
+                <div>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ Learned ML Urgency</span>
+                    {render_lgbm_badge(ml_prio)}
+                </div>
+                <div>
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">🛡️ Deterministic Safety Baseline</span>
+                    {render_rule_based_badge(rule_prio)}
+                </div>
+                <div>
+                    {concordance_badge}
+                    {render_decision_path_badge(decision_path)}
+                </div>
+                <div style="margin-left: auto; text-align: right;">
+                    <span style="font-size: 12px; color: #475569; display: block;">
+                        SLM Engine: <strong><code>{prov_name}</code></strong>
+                    </span>
+                    <span style="font-size: 12px; color: #64748B; display: block;">
+                        Model Status: <strong><code>{model_status}</code></strong> | Protocol: <code>{rule_ver}</code>
+                    </span>
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
-            if rev_prio and rev_prio != c_prio:
-                st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Original Algorithmic Priority: **{c_prio}**)")
+            if escalation_applied:
+                st.error(f"🚨 **Deterministic Safety Gate Escalation**: Primary triage is escalated to **{final_prio}** because: *{escalation_reason}*. Emergency protocols strictly override lower-acuity ML classifications.")
+            elif rule_prio != ml_prio:
+                st.warning(f"⚠️ **Dual-Signal Triage Divergence**: Guarded Final: **{final_prio}** | LightGBM Predicted: **{ml_prio}** | Rule Baseline: **{rule_prio}**. Clinician review advised.")
+            else:
+                st.success(f"✅ **Dual-Signal Concordance**: Both clinical safety gate and LightGBM model agree on **{final_prio}**.")
+
+            if imputed_feats:
+                imputed_str = ", ".join([f"`{f}`" for f in imputed_feats])
+                st.markdown(f"""
+                <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-left: 4px solid #F59E0B; padding: 10px 14px; border-radius: 6px; color: #92400E; font-size: 12.5px; margin-bottom: 14px;">
+                    <strong>ℹ️ Imputed Clinical Vitals Telemetry:</strong> Continuous features {imputed_str} were not found in patient messages or reports. Standardized population medians were populated for LightGBM inference and tracked as imputed.
+                </div>
+                """, unsafe_allow_html=True)
+
+            if rev_prio and rev_prio != final_prio:
+                st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Algorithmic Guarded Priority: **{final_prio}**)")
+
+            # Multi-Dimensional Clinical AI Reasoning & Explainability Card
+            explanation = case_data.get("clinical_explanation")
+            if explanation:
+                with st.expander("🧠 Clinical AI Reasoning & Explainability (Why It Classified Like That)", expanded=True):
+                    col_exp1, col_exp2 = st.columns([1, 1])
+                    with col_exp1:
+                        st.markdown(f"**Primary Organ System Affected:** `{explanation.get('primary_system', 'Cardiopulmonary')}`")
+                        
+                        # Red flags
+                        red_flags = explanation.get("red_flags", [])
+                        if red_flags:
+                            st.markdown("**Critical Acuity Red Flags Identified:**")
+                            for rf in red_flags:
+                                st.markdown(f"- 🔴 {rf}")
+                        else:
+                            st.markdown("✅ *No acute red-flag pain or hyper-acute triggers detected.*")
+
+                        # Consensus rationale
+                        st.markdown("**Dual-Signal Consensus Rationale:**")
+                        st.info(explanation.get("consensus_summary", "Concordance between clinical safety rules and ML model."))
+
+                    with col_exp2:
+                        # Vital sign deviations
+                        st.markdown("**Physiological Vital Sign Status:**")
+                        vital_devs = explanation.get("vital_deviations", [])
+                        if vital_devs:
+                            for vd in vital_devs:
+                                st.markdown(f"- ⚠️ **{vd}**")
+                        else:
+                            st.markdown("✅ *All measured vital signs within normal reference ranges.*")
+
+                        # Model probability distribution
+                        probs = explanation.get("probabilities", {})
+                        if probs:
+                            st.markdown("**LightGBM Acuity Probability Distribution:**")
+                            p_cols = st.columns(len(probs))
+                            for idx, (tier, p_val) in enumerate(probs.items()):
+                                with p_cols[idx]:
+                                    pct = int(p_val * 100)
+                                    st.metric(label=tier, value=f"{pct}%")
 
             # -------------------------------------------------------------
             # CLINICIAN QUICK CONTROLS: ADJUST PRIORITY, MARK DONE, DELETE
@@ -571,6 +655,35 @@ with col_detail:
                     else:
                         for m in ocr_msgs:
                             st.text_area(f"Document Message OCR:", value=m.get("content", ""), height=110, disabled=True, key=f"msg_ocr_{m.get('id')}")
+
+                    # Structured Medical Facts Extraction
+                    struct_facts = evidence_st.get("structured_medical_facts", [])
+                    if struct_facts:
+                        st.markdown("---")
+                        st.markdown("#### 🧪 Structured Medical Facts & Clinical Values Extracted")
+                        st.caption("Standardized measurements, lab reference ranges, and uncertainty audit flags:")
+                        for sf in struct_facts:
+                            meas = sf.get("measurement", "Measurement").replace("_", " ").title()
+                            val = sf.get("value")
+                            unit = sf.get("unit", "")
+                            ref = sf.get("reference_range", "N/A")
+                            u_flag = sf.get("uncertainty_flag", False)
+                            u_reason = sf.get("uncertainty_reason", "")
+                            date_str = sf.get("date", "")
+                            
+                            flag_html = f'<span style="background:#FEE2E2; color:#991B1B; font-size:11px; font-weight:700; padding:2px 6px; border-radius:4px; border:1px solid #FCA5A5;">⚠️ Uncertain ({u_reason})</span>' if u_flag else '<span style="background:#ECFDF5; color:#047857; font-size:11px; font-weight:700; padding:2px 6px; border-radius:4px; border:1px solid #A7F3D0;">✅ Verified</span>'
+                            
+                            st.markdown(f"""
+                            <div style="border:1px solid #E2E8F0; border-radius:6px; padding:8px 12px; margin-bottom:6px; background:#FFFFFF;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <strong>{meas}:</strong> <span style="font-weight:600; color:#0F172A;">{val} {unit}</span>
+                                    <div>{flag_html}</div>
+                                </div>
+                                <div style="font-size:12px; color:#64748B; margin-top:2px;">
+                                    Reference Range: <code>{ref}</code> {f'| Document Date: {date_str}' if date_str else ''}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
             # Warnings / Missing Info / Uncertainties
             missing = case_data.get("missing_information", [])

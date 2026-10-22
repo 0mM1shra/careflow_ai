@@ -42,7 +42,7 @@ class DeterministicTriageEngine:
             "id": "RULE-P0-RESP-02",
             "name": "Acute Severe Respiratory Compromise",
             "criterion": "Severe shortness of breath, inability to speak full sentences, or stridor",
-            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking|सांस\s*फूल|दम\s*फूल|सांस\s*लेने\s*में\s*(?:.{0,20}?)(?:तकलीफ|दिक्कत|परेशानी)|दम\s*घुट|सांस\s*नहीं\s*आ\s*रही|saans\s*lene\s*me\s*takleef|dam\s*phool\s*raha)",
+            "pattern": r"(can't\s*breathe|cannot\s*breathe|gasping|severe\s*shortness\s*of\s*breath|stridor|choking|सांस\s*फूल|दम\s*फूल|सांस\s*लेने\s*में\s*(?:.{0,20}?)(?:तकलीफ|दिक्कत|परेशानी)|दम\s*घुट|सांस\s*नहीं\s*आ\s*रही|saans\s*lene\s*me\s*takleef|dam\s*phool\s*raha|sa?ns\s*(?:nhe|nahi|nahin|ni)\s*(?:liya|li)\s*ja\s*rh?a|sa?ns\s*n(?:ahi|he|hin)\s*aa?\s*rahi|saans\s*nahi\s*aarahi)",
             "action": "Immediate respiratory assessment and oxygenation support."
         },
         {
@@ -154,22 +154,120 @@ class DeterministicTriageEngine:
         evidence_state: Dict[str, Any],
         raw_messages: List[str],
         ai_status: str = "ready",
+        vitals: Optional[Dict[str, Any]] = None,
         lab_vitals: Optional[Dict[str, Any]] = None
     ) -> TriageResult:
         """
+        Main triage orchestrator method with deterministic safety gate.
+        Combines deterministic rules (ESI/MTS protocol with continuous vitals thresholds)
+        alongside trained LightGBM urgency classifier with safety override.
+        """
+        effective_vitals = vitals if vitals is not None else lab_vitals
+        from backend.ml_triage_service import predict_urgency_lgbm_with_details, extract_vitals_with_metadata
+        all_text = " ".join(raw_messages)
+        active_vitals_input = effective_vitals if effective_vitals is not None else evidence_state.get("vitals")
+        parsed_vitals, imputed_features = extract_vitals_with_metadata(active_vitals_input, all_text)
+
+        # 1. Evaluate deterministic protocol rules (including vital sign thresholds)
+        rule_result = self._evaluate_rules(
+            evidence_state=evidence_state,
+            raw_messages=raw_messages,
+            ai_status=ai_status,
+            vitals=parsed_vitals,
+            imputed_fields=imputed_features
+        )
+        rule_based_triage = rule_result.priority_category
+
+        # If system failure (ERR), return immediately
+        if rule_based_triage == "ERR":
+            rule_result.rule_based_triage = "ERR"
+            rule_result.final_triage = "ERR"
+            rule_result.ml_model_triage = None
+            rule_result.escalation_applied = True
+            rule_result.escalation_reason = "System failure safeguard triggered."
+            rule_result.model_status = "unavailable"
+            return rule_result
+
+        # 2. Call trained LightGBM urgency model
+        ml_model_triage = None
+        model_status = "available"
+        try:
+            slm_features = evidence_state.get("slm_extraction") or evidence_state
+            ml_details = predict_urgency_lgbm_with_details(slm_features, parsed_vitals)
+            ml_model_triage = ml_details.get("predicted_tier")
+            model_status = ml_details.get("model_status", "available")
+            imputed_features = ml_details.get("imputed_features", imputed_features)
+        except Exception as e:
+            logger.warning(f"LightGBM ML triage prediction failed: {e}")
+            model_status = "error"
+            ml_model_triage = None
+
+        # 3. Deterministic Safety Gate Decision Layer
+        final_triage = rule_based_triage
+        escalation_applied = False
+        escalation_reason = None
+
+        if rule_based_triage in ("P0", "P1"):
+            final_triage = rule_based_triage
+            if ml_model_triage and ml_model_triage in ("P2", "P3"):
+                escalation_applied = True
+                rule_name = rule_result.triggered_rules[0].rule_name if rule_result.triggered_rules else "Emergency Red Flag"
+                escalation_reason = f"Deterministic emergency override: Protocol rule '{rule_name}' mandates {rule_based_triage}. Lower-acuity ML prediction ({ml_model_triage}) suppressed for patient safety."
+            elif ml_model_triage == "P0" and rule_based_triage == "P1":
+                final_triage = "P0"
+                escalation_applied = True
+                escalation_reason = "Escalated to P0 (Resuscitation) based on multi-system ML physiological urgency prediction."
+            else:
+                escalation_applied = False
+                escalation_reason = f"Emergency tier {rule_based_triage} verified by clinical protocol."
+        else:
+            if model_status == "available" and ml_model_triage:
+                final_triage = ml_model_triage
+                if ml_model_triage in ("P0", "P1"):
+                    escalation_applied = True
+                    escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
+                elif ml_model_triage != rule_based_triage:
+                    escalation_applied = True
+                    escalation_reason = f"ML model triage ({ml_model_triage}) calibrated from clinical training distribution."
+                else:
+                    escalation_applied = False
+                    escalation_reason = f"Concordant tier {final_triage} between ML model and clinical protocol."
+            else:
+                final_triage = rule_based_triage
+                escalation_applied = True
+                escalation_reason = "Model unavailable fallback: Assigned via deterministic clinical protocol due to ML classifier unavailability."
+
+        rule_result.priority_category = final_triage
+        rule_result.final_triage = final_triage
+        rule_result.rule_based_priority = rule_based_triage
+        rule_result.rule_based_triage = rule_based_triage
+        rule_result.ml_model_priority = ml_model_triage
+        rule_result.ml_model_triage = ml_model_triage
+        rule_result.escalation_applied = escalation_applied
+        rule_result.escalation_reason = escalation_reason
+        rule_result.decision_path = "protocol_safety_guardrail" if (rule_based_triage in ("P0", "P1") or escalation_applied) else "model_urgency_reasoning"
+        rule_result.model_status = model_status
+        rule_result.imputed_features = imputed_features
+        return rule_result
+
+    def _evaluate_rules(
+        self,
+        evidence_state: Dict[str, Any],
+        raw_messages: List[str],
+        ai_status: str = "ready",
+        vitals: Optional[Dict[str, Any]] = None,
+        imputed_fields: Optional[List[str]] = None
+    ) -> TriageResult:
+        """
         Evaluates clinical evidence and generates a transparent, auditable TriageResult.
-        Multi-Tiered Architecture:
-        - Tier 1: Dynamic Model Urgency Reasoning (MedGemma clinical rationale & verbatim quotes)
-        - Tier 2: Multidimensional Clinical Acuity Synthesis (pain severity, acute deterioration, autonomic signs, conflict/uncertainty)
-        - Tier 3: Universal Protocol Safety Guardrail Floor (Manchester Triage / ESI life threats safety net)
-        - Tier 4: System Fallback (safe default on AI service failure)
-        - ML Classifier: LightGBM Tabular Urgency Prediction alongside deterministic rules
+        Combines deterministic protocol safety checks with MedGemma model-reasoned urgency signals
+        and continuous vital signs thresholds (SpO2, SBP, HR, Temp).
         """
         # Compute LightGBM ML urgency prediction alongside deterministic rules
         ml_prediction = "P3"
         ml_conf = 0.0
         try:
-            res = predict_urgency_lgbm(evidence_state, lab_vitals)
+            res = predict_urgency_lgbm(evidence_state, vitals)
             ml_prediction = str(res)
             ml_conf = float(res.get("ml_confidence", 0.0)) if isinstance(res, dict) else 0.0
         except Exception as e:
@@ -206,6 +304,15 @@ class DeterministicTriageEngine:
 
         all_patient_text = " ".join(raw_messages).lower()
         model_urgency_signals = evidence_state.get("urgency_signals", [])
+
+        # Resolve continuous vitals and imputed fields if not explicitly provided
+        from backend.ml_triage_service import extract_vitals_with_metadata
+        if vitals is not None and imputed_fields is not None:
+            active_vitals = vitals
+            active_imputed = imputed_fields
+        else:
+            active_vitals_input = vitals if vitals is not None else evidence_state.get("vitals")
+            active_vitals, active_imputed = extract_vitals_with_metadata(active_vitals_input, all_patient_text)
 
         # -------------------------------------------------------------
         # P0 Evaluation (Emergency Life Threats)
@@ -253,12 +360,56 @@ class DeterministicTriageEngine:
                 p0_reasons.append(f"Triggered {rule['id']} ({rule['name']}): '{source_msg[:90]}'")
                 break
 
+        # 3b. Check Continuous Vital Signs Red Flags (ESI Level 1 / Critical Life Threats)
+        # Only evaluate explicit/measured vitals (not imputed defaults)
+        if "spo2_pct" not in active_imputed:
+            spo2 = active_vitals.get("spo2_pct")
+            if spo2 is not None and 40 <= spo2 < 92:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-SPO2",
+                    rule_name="Critical Hypoxemia (SpO2 < 92%)",
+                    priority="P0",
+                    criterion=f"Oxygen saturation SpO2 of {spo2}% is below critical threshold of 92%",
+                    matched_evidence=f"SpO2: {spo2}% (severe hypoxemia)",
+                    action_protocol="Immediate emergency high-flow oxygen therapy, respiratory stabilization, and urgent clinician transfer."
+                )
+                protocol_p0_triggers.append(trigger)
+                p0_warning_signs.append(f"Critical Hypoxemia: SpO2 {spo2}% (<92%)")
+                p0_reasons.append(f"Triggered RULE-P0-VITAL-SPO2 (Critical Hypoxemia): SpO2 {spo2}% is below critical threshold (<92%)")
+
+        if "systolic_bp" not in active_imputed:
+            sbp = active_vitals.get("systolic_bp")
+            if sbp is not None and 30 <= sbp < 90:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-BP",
+                    rule_name="Hypotensive Shock (Systolic BP < 90 mmHg)",
+                    priority="P0",
+                    criterion=f"Systolic blood pressure of {sbp} mmHg indicates severe circulatory shock",
+                    matched_evidence=f"Systolic BP: {sbp} mmHg (shock)",
+                    action_protocol="Immediate hemodynamic resuscitation, large-bore IV access, fluid challenge, and emergency physician evaluation."
+                )
+                protocol_p0_triggers.append(trigger)
+                p0_warning_signs.append(f"Hypotensive Shock: Systolic BP {sbp} mmHg (<90 mmHg)")
+                p0_reasons.append(f"Triggered RULE-P0-VITAL-BP (Hypotensive Shock): Systolic BP {sbp} mmHg is below critical threshold (<90 mmHg)")
+
+        if "heart_rate" not in active_imputed:
+            hr = active_vitals.get("heart_rate")
+            if hr is not None and hr >= 140:
+                trigger = TriageTrigger(
+                    rule_id="RULE-P0-VITAL-HR",
+                    rule_name="Critical Tachyarrhythmia (Heart Rate >= 140 bpm)",
+                    priority="P0",
+                    criterion=f"Heart rate of {hr} bpm reaches life-threatening tachyarrhythmia threshold (>=140 bpm)",
+                    matched_evidence=f"Heart Rate: {hr} bpm (extreme tachycardia)",
+                    action_protocol="Immediate 12-lead ECG, continuous telemetry monitoring, and emergency cardiology evaluation."
+                )
+                protocol_p0_triggers.append(trigger)
+                p0_warning_signs.append(f"Critical Tachycardia: Heart rate {hr} bpm (>=140 bpm)")
+                p0_reasons.append(f"Triggered RULE-P0-VITAL-HR (Critical Tachycardia): Heart rate {hr} bpm is >= 140 bpm")
+
         if protocol_p0_triggers or model_p0_triggers:
-            # Protocol triggers placed first for deterministic rule precedent in safety checks
             combined_p0 = protocol_p0_triggers + model_p0_triggers
-            dec_path = "model_urgency_reasoning" if (model_p0_triggers and not protocol_p0_triggers) else (
-                "model_urgency_reasoning" if model_p0_triggers else "protocol_safety_guardrail"
-            )
+            dec_path = "model_urgency_reasoning" if (model_p0_triggers and not protocol_p0_triggers) else "protocol_safety_guardrail"
             return TriageResult(
                 priority_category="P0",
                 rule_based_priority="P0",
@@ -386,6 +537,51 @@ class DeterministicTriageEngine:
             else:
                 dec_path = "multidimensional_acuity_synthesis"
 
+        # Check Continuous Vital Signs Urgent Indicators (ESI Level 2 / Urgent Acuity)
+        if "heart_rate" not in active_imputed:
+            hr = active_vitals.get("heart_rate")
+            if hr is not None and 130 < hr < 140 and not any(t.rule_id in ("RULE-P0-VITAL-HR", "RULE-P1-VITAL-HR") for t in protocol_p1_triggers):
+                trigger = TriageTrigger(
+                    rule_id="RULE-P1-VITAL-HR",
+                    rule_name="Severe Tachycardia (Heart Rate > 130 bpm)",
+                    priority="P1",
+                    criterion=f"Heart rate of {hr} bpm exceeds safe threshold of 130 bpm",
+                    matched_evidence=f"Heart Rate: {hr} bpm",
+                    action_protocol="Urgent clinical assessment, continuous vital monitoring, and 12-lead ECG within 30-60 minutes."
+                )
+                protocol_p1_triggers.append(trigger)
+                p1_warning_signs.append(f"Severe Tachycardia: Heart rate {hr} bpm (>130 bpm)")
+                p1_reasons.append(f"Triggered RULE-P1-VITAL-HR (Severe Tachycardia): Heart rate {hr} bpm exceeds 130 bpm")
+
+        if "temp_f" not in active_imputed:
+            temp = active_vitals.get("temp_f")
+            if temp is not None and temp > 104.0 and not any(t.rule_id == "RULE-P1-VITAL-TEMP" for t in protocol_p1_triggers):
+                trigger = TriageTrigger(
+                    rule_id="RULE-P1-VITAL-TEMP",
+                    rule_name="Severe Hyperpyrexia (Temperature > 104.0°F)",
+                    priority="P1",
+                    criterion=f"Measured temperature of {temp}°F represents severe hyperpyrexia with neuro/sepsis risk",
+                    matched_evidence=f"Temperature: {temp}°F",
+                    action_protocol="Urgent antipyretic administration, active cooling, sepsis workup, and physician review within 1 hour."
+                )
+                protocol_p1_triggers.append(trigger)
+                p1_warning_signs.append(f"Hyperpyrexia: Temperature {temp}°F (>104.0°F)")
+                p1_reasons.append(f"Triggered RULE-P1-VITAL-TEMP (Hyperpyrexia): Temperature {temp}°F exceeds 104.0°F")
+
+        # Check SLM-extracted severe pain flag
+        slm_features = evidence_state.get("slm_extraction", {})
+        if (slm_features.get("red_flag_severe_pain") or evidence_state.get("symptoms", {}).get("severe_pain") == "reported") and not any(t.rule_id == "RULE-P1-PAIN-02" for t in protocol_p1_triggers + acuity_p1_triggers):
+            trigger = TriageTrigger(
+                rule_id="RULE-P1-PAIN-02",
+                rule_name="Severe Uncontrolled Pain",
+                priority="P1",
+                criterion="SLM extracted red_flag_severe_pain=True",
+                matched_evidence="SLM identified severe pain red flag",
+                action_protocol="Urgent clinical review for acute pain etiology and analgesia."
+            )
+            protocol_p1_triggers.append(trigger)
+            p1_warning_signs.append("Severe Uncontrolled Pain: SLM severe pain flag")
+            p1_reasons.append("Triggered RULE-P1-PAIN-02: SLM identified red_flag_severe_pain=True")
             return TriageResult(
                 priority_category="P1",
                 rule_based_priority="P1",
