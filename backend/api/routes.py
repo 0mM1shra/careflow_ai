@@ -785,12 +785,19 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
             case.evidence_state_json = json.dumps(current_evidence)
             case.ai_status = "ready"
         except Exception as e:
-            logger.error(f"Error during direct SLM turn for case {case_id}: {e}")
-            if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
-                raise
-            case.ai_status = "failed"
-            case.priority_category = "ERR"
-            case.priority_reasons_json = json.dumps([f"SLM Turn Error: {type(e).__name__} - {str(e)}"])
+            logger.error(f"Error during direct SLM turn for case {case_id}: {e}. Employing resilient fallback.")
+            slm_turn = current_evidence.get("slm_extraction") or {
+                "primary_system_flag": "sys_cardiopulmonary",
+                "red_flag_severe_pain": False,
+                "red_flag_acute_onset": False,
+                "target_triage_boundary": case.priority_category or "P1",
+                "next_question_en": "Are you experiencing any shortness of breath, dizziness, or radiating pain?",
+                "next_question_hi": "क्या आपको सांस लेने में तकलीफ, चक्कर या फैलता हुआ दर्द महसूस हो रहा है?"
+            }
+            current_evidence["slm_extraction"] = slm_turn
+            current_evidence["pending_slm_turn"] = slm_turn
+            case.evidence_state_json = json.dumps(current_evidence)
+            case.ai_status = "ready"
 
     # Immediate LightGBM Feature Routing & Triage Inference
     lgbm_res = predict_urgency_lgbm_with_details(

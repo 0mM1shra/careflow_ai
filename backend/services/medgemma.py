@@ -136,7 +136,7 @@ class MedGemmaService:
         self,
         prompt: str,
         model_name: Optional[str] = None,
-        max_tokens: int = 140,
+        max_tokens: int = 384,
         schema: Optional[Dict[str, Any]] = None
     ) -> str:
         """Executes inference via local Ollama daemon with strict grammar-constrained JSON decoding."""
@@ -150,7 +150,7 @@ class MedGemmaService:
             "keep_alive": "30m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": 120,
+                "num_predict": max_tokens or 384,
                 "num_ctx": 8192,
                 "keep_alive": "30m",
             }
@@ -243,17 +243,54 @@ class MedGemmaService:
         }
 
     def _clean_json_text(self, text: str) -> str:
-        """Strips markdown code fences and extraneous text from model output."""
+        """Strips markdown code fences and automatically repairs unterminated or truncated JSON."""
         text = text.strip()
-        # Look for ```json ... ``` or ``` ... ```
         fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
         if fence_match:
             text = fence_match.group(1).strip()
-        # If text contains extra text before '{' or after '}'
         start = text.find("{")
+        if start != -1:
+            text = text[start:]
+
+        # Test if already valid JSON
+        try:
+            json.loads(text)
+            return text
+        except Exception:
+            pass
+
+        # Repair 1: Check for unterminated string (odd count of unescaped quotes)
+        repaired = text.strip()
+        unescaped_quotes = len(re.findall(r'(?<!\\)"', repaired))
+        if unescaped_quotes % 2 != 0:
+            repaired += '"'
+
+        # Repair 2: Balance open curly braces
+        open_braces = repaired.count('{') - repaired.count('}')
+        if open_braces > 0:
+            repaired += '}' * open_braces
+
+        try:
+            json.loads(repaired)
+            return repaired
+        except Exception:
+            pass
+
+        # Repair 3: Truncate after last complete key-value pair if string was cut off mid-value
+        last_comma = repaired.rfind(",")
+        last_colon = repaired.rfind(":")
+        if last_comma != -1 and last_comma > last_colon:
+            candidate = repaired[:last_comma].rstrip() + "\n}"
+            try:
+                json.loads(candidate)
+                return candidate
+            except Exception:
+                pass
+
+        # Fallback to bounded substring if available
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            text = text[start:end+1]
+            return text[start:end+1]
         return text
 
     def generate_json(self, system_prompt: str, user_prompt: str, max_retries: Optional[int] = None) -> Dict[str, Any]:
@@ -473,7 +510,7 @@ class MedGemmaService:
             if self.is_ollama_available():
                 model = settings.OLLAMA_MODEL
                 logger.info(f"Executing turn via Fine-Tuned Ollama model '{model}'...")
-                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=384)
                 return raw, f"ollama:{model}"
             elif self.mode in ("local", "peft") and self.has_adapter:
                 logger.info("Executing turn via local PEFT pipeline...")
@@ -492,7 +529,7 @@ class MedGemmaService:
             model = getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
             if self.is_ollama_available(model):
                 logger.info(f"Executing turn via Base Ollama model '{model}'...")
-                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=384)
                 return raw, f"ollama:{model}"
             elif settings.EXTERNAL_API_KEY:
                 logger.info("Base Ollama unavailable; falling back to configured External API...")
@@ -553,12 +590,31 @@ class MedGemmaService:
             turn_obj = TriageTurnSchema(**parsed)
             clean_dict = turn_obj.model_dump()
         except Exception as err:
-            logger.error(f"Failed to parse/validate raw SLM JSON: {err}. Raw: {raw_response[:200]}")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
-                clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
-                clean_dict["validation_status"] = "mock_fallback"
-            else:
-                raise ModelInferenceError(f"SLM output violated schema contract: {err}")
+            logger.warning(f"Standard JSON parse failed ({err}). Attempting regex fallback extraction...")
+            # Fallback regex extraction so model inference NEVER throws an unhandled 500
+            q_en_match = re.search(r'"next_question_en"\s*:\s*"([^"\r\n]+)', raw_response)
+            q_hi_match = re.search(r'"next_question_hi"\s*:\s*"([^"\r\n]+)', raw_response)
+            sys_match = re.search(r'"primary_system_flag"\s*:\s*"([^"]+)"', raw_response)
+            pain_match = re.search(r'"red_flag_severe_pain"\s*:\s*(true|false|1|0)', raw_response, re.IGNORECASE)
+            onset_match = re.search(r'"red_flag_acute_onset"\s*:\s*(true|false|1|0)', raw_response, re.IGNORECASE)
+            boundary_match = re.search(r'"target_triage_boundary"\s*:\s*"([^"]+)"', raw_response)
+
+            ext_q_en = q_en_match.group(1).strip() if q_en_match else "Could you describe if your discomfort is spreading or getting worse right now?"
+            ext_q_hi = q_hi_match.group(1).strip() if q_hi_match else translation_service.translate_to_hindi(ext_q_en)
+            ext_sys = sys_match.group(1).strip() if sys_match else "sys_cardiopulmonary"
+            ext_pain = pain_match.group(1).lower() in ("true", "1") if pain_match else False
+            ext_onset = onset_match.group(1).lower() in ("true", "1") if onset_match else False
+            ext_boundary = boundary_match.group(1).strip() if boundary_match else "P1"
+
+            clean_dict = {
+                "primary_system_flag": ext_sys,
+                "red_flag_severe_pain": ext_pain,
+                "red_flag_acute_onset": ext_onset,
+                "target_triage_boundary": ext_boundary,
+                "next_question_en": ext_q_en,
+                "next_question_hi": ext_q_hi,
+                "validation_status": "repaired_regex"
+            }
 
         # Outbound pure neural translation to clean Devanagari Hindi
         q_en = str(clean_dict.get("next_question_en", "")).strip()
