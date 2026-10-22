@@ -1,5 +1,11 @@
 # CareFlow: MedGemma-Powered Clinical Intake, Multimodal Triage & Reviewer Dashboard
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://careflow-ai-d.streamlit.app/)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-CareFlow_Streamlit_App-0F766E?style=for-the-badge&logo=streamlit)](https://careflow-ai-d.streamlit.app/)
+
+> 🌐 **Live Web Application**: **[https://careflow-ai-d.streamlit.app/](https://careflow-ai-d.streamlit.app/)**  
+> Experience the live Patient Symptom Intake, Clinician Reviewer Dashboard (Staff PIN: `CAREFLOW`), and AI Model Architecture Showcase directly in your browser.
+
 **CareFlow** is an end-to-end clinical intake and triage decision-support prototype built for medical research and hackathons. It integrates **Google MedGemma** for conversational clinical fact extraction and grounded summarization, paired with an **auditable, deterministic rule-based triage engine**, **multilingual capability (English, Devanagari Hindi, and Hinglish)**, **local voice speech-to-text with patient confirmation**, **medical report OCR ingestion**, and a **clinician-in-the-loop review dashboard with complete provenance tracking**.
 
 > **⚠️ RESEARCH PROTOTYPE DISCLAIMER**
