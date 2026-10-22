@@ -320,20 +320,9 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.markdown("### 🔒 Clinician Access Portal")
-    st.caption("Enter current hospital staff access code to open reviewer dashboard:")
-    staff_code_input = st.text_input(
-        "Staff Access PIN:",
-        type="password",
-        key="patient_sidebar_staff_pin",
-        help="Hospital staff demo PIN: CAREFLOW or 1234"
-    )
+    st.markdown("### 📋 Clinician Reviewer Portal")
     if st.button("Open Reviewer Dashboard 📋", type="primary", use_container_width=True, key="btn_patient_to_reviewer"):
-        if staff_code_input.strip().upper() in ("CAREFLOW", "1234", "STAFF", "DOCTOR"):
-            st.session_state.clinician_authenticated = True
-            st.switch_page("pages/reviewer.py")
-        else:
-            st.error("Invalid Staff PIN. Please enter CAREFLOW or 1234.")
+        st.switch_page("pages/reviewer.py")
 
     st.divider()
     st.page_link("pages/model_showcase.py", label="🧠 Model Architecture", icon="🧠")

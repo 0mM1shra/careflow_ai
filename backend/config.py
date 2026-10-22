@@ -19,8 +19,8 @@ class Settings:
     EXTERNAL_API_MODEL: str = os.getenv("EXTERNAL_API_MODEL", "gemma2-9b-it")
 
     # Model execution mode: 'mock', 'hosted', or 'local' (or 'peft')
-    MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "local").lower()
-    ENABLE_MOCK_FALLBACK: bool = os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() == "true"
+    MEDGEMMA_MODE: str = os.getenv("MEDGEMMA_MODE", "hosted").lower()
+    ENABLE_MOCK_FALLBACK: bool = os.getenv("ENABLE_MOCK_FALLBACK", "true").lower() == "true"
     
     # Model Identifier & Fine-Tuned LoRA Adapter
     MEDGEMMA_MODEL_ID: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")

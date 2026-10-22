@@ -493,19 +493,7 @@ class AdaptiveQuestioningService:
         q_en = slm_turn.get("next_question_en")
         q_hi = slm_turn.get("next_question_hi")
 
-        # Step 1: Check if an empathetic, targeted symptom inquiry or unasked clinical dimension applies
-        cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
-        if cat_q:
-            cat_q.slm_extraction = slm_turn
-            if not cat_q.next_question_en:
-                cat_q.next_question_en = cat_q.next_question if lang.lower() != "hindi" else (q_en or cat_q.next_question)
-            if not cat_q.next_question_hi:
-                cat_q.next_question_hi = cat_q.next_question if lang.lower() == "hindi" else (q_hi or cat_q.next_question)
-            cat_q.selected_provider = provider or slm_turn.get("selected_provider", "finetuned_medgemma")
-            cat_q.validation_status = slm_turn.get("validation_status", "valid")
-            return cat_q
-
-        # Step 2: Return the neural model's generated question
+        # Step 1: Return the neural SLM's generated question immediately
         if slm_turn and (q_en or q_hi):
             q_text = q_hi if (lang.lower() == "hindi" and q_hi) else (q_en or q_hi)
             return FollowUpQuestionOutput(
@@ -519,6 +507,18 @@ class AdaptiveQuestioningService:
                 selected_provider=provider or slm_turn.get("selected_provider", "finetuned_medgemma"),
                 validation_status=slm_turn.get("validation_status", "valid")
             )
+
+        # Step 2: Fallback to targeted symptom inquiry or unasked clinical dimension catalog
+        cat_q = cls._get_unasked_fallback_question(assistant_messages, patient_messages, lang)
+        if cat_q:
+            cat_q.slm_extraction = slm_turn
+            if not cat_q.next_question_en:
+                cat_q.next_question_en = cat_q.next_question if lang.lower() != "hindi" else (q_en or cat_q.next_question)
+            if not cat_q.next_question_hi:
+                cat_q.next_question_hi = cat_q.next_question if lang.lower() == "hindi" else (q_hi or cat_q.next_question)
+            cat_q.selected_provider = provider or slm_turn.get("selected_provider", "finetuned_medgemma")
+            cat_q.validation_status = slm_turn.get("validation_status", "valid")
+            return cat_q
 
         # Step 3: Guarded Mock Catalog Fallback (strictly disabled during live neural testing)
         enable_mock = os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() == "true"

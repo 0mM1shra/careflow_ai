@@ -185,16 +185,8 @@ with col_reviewer:
     </div>
     """, unsafe_allow_html=True)
     
-    # Secure Staff Login Gate
-    with st.expander("🔐 Clinician Login / Staff Verification", expanded=False):
-        st.caption("Authorized Hospital Staff Access: Enter your Clinician Access Code to enter the queue.")
-        staff_pin = st.text_input("Clinician Access PIN", type="password", key="home_staff_pin", help="Default demo access: CAREFLOW or 1234")
-        if st.button("Authorize & Open Reviewer Queue →", use_container_width=True, key="btn_auth_reviewer"):
-            if staff_pin.strip().upper() in ("CAREFLOW", "1234", "STAFF", "DOCTOR"):
-                st.session_state.clinician_authenticated = True
-                st.switch_page("pages/reviewer.py")
-            else:
-                st.error("Invalid Clinician PIN. Please check with your hospital administration or use demo PIN 'CAREFLOW'.")
+    if st.button("Open Reviewer Dashboard →", type="primary", use_container_width=True, key="btn_auth_reviewer"):
+        st.switch_page("pages/reviewer.py")
 
 st.divider()
 

@@ -811,7 +811,7 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         case.ai_status = "ready"
     except Exception as e:
         logger.error(f"Error during direct SLM turn for case {case_id}: {e}")
-        if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
+        if os.getenv("ENABLE_MOCK_FALLBACK", "true").lower() != "true":
             raise
         case.ai_status = "failed"
         case.priority_category = "ERR"

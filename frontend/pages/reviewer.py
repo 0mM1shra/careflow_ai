@@ -216,36 +216,6 @@ def parse_vitals_from_case(case_data: dict):
         "lactate": (f"{lac_val:.1f}", lac_abnormal)
     }
 
-# Clinician Authentication Gate
-if not st.session_state.get("clinician_authenticated", False):
-    col_gate1, col_gate2, col_gate3 = st.columns([1, 2, 1])
-    with col_gate2:
-        with st.container(border=True):
-            st.markdown("""
-            <div style="text-align: center; padding: 10px 0 16px 0;">
-                <div style="font-size: 38px; margin-bottom: 8px;">🔒</div>
-                <h3 style="margin: 0; color: #0F172A; font-size: 22px; font-weight: 700;">CareFlow Clinician Access Portal</h3>
-                <div style="font-size: 13.5px; color: #64748B; margin-top: 6px;">
-                    Authorized Staff Only — Emergency Triage Nurses & Physicians
-                </div>
-            </div>
-            <div style="background: #FEF2F2; border-left: 4px solid #EF4444; padding: 12px; border-radius: 6px; font-size: 12.5px; color: #991B1B; margin-bottom: 18px; line-height: 1.45;">
-                <strong>Protected Health Information:</strong> Patient clinical records and LightGBM risk classifications are confidential. Unauthorized access is prohibited.
-            </div>
-            """, unsafe_allow_html=True)
-            staff_pin = st.text_input("Enter Clinician PIN / Staff Access Code:", type="password", key="gate_staff_pin", help="Demo access code: CAREFLOW or 1234")
-            if st.button("Authorize & Open Clinical Queue 🩺", type="primary", use_container_width=True, key="btn_unlock_rev"):
-                if staff_pin.strip().upper() in ("CAREFLOW", "1234", "STAFF", "DOCTOR"):
-                    st.session_state.clinician_authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Invalid Staff PIN. Please try again.")
-
-            st.write("")
-            if st.button("← Return to Patient Intake Portal", use_container_width=True, key="btn_exit_to_patient"):
-                st.switch_page("pages/patient.py")
-    st.stop()
-
 # App Header
 st.markdown("""
 <div class="reviewer-header-bar">
@@ -272,14 +242,8 @@ if "selected_case_id" not in st.session_state:
 with st.sidebar:
     st.markdown("### 🏥 Patient Queue")
     
-    col_lock1, col_lock2 = st.columns(2)
-    with col_lock1:
-        if st.button("🔒 Lock Portal", use_container_width=True, help="Lock clinician session"):
-            st.session_state.clinician_authenticated = False
-            st.rerun()
-    with col_lock2:
-        if st.button("🩺 Patient UI", use_container_width=True, help="Switch to patient intake"):
-            st.switch_page("pages/patient.py")
+    if st.button("🩺 Switch to Patient Intake", use_container_width=True, help="Switch to patient intake"):
+        st.switch_page("pages/patient.py")
 
     st.divider()
     

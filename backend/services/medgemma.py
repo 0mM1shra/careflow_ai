@@ -462,13 +462,21 @@ class MedGemmaService:
         """
         backend_mode = getattr(settings, "MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
         active_provider = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
+        has_hosted_creds = bool(self.endpoint or self.api_key or os.getenv("HF_TOKEN"))
 
-        # Check explicit provider override or router mode
+        # 1. Check explicit External API override
         if backend_mode == "external_api" or active_provider == "external_api":
             logger.info(f"Executing turn via External API ({settings.EXTERNAL_API_MODEL})...")
             raw = self._call_external_api(system_prompt, user_prompt)
             return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
 
+        # 2. Hosted MedGemma API (Hugging Face Router or custom endpoint) - Primary for Cloud
+        elif self.mode == "hosted" or backend_mode == "hosted" or active_provider == "hosted" or (not self.is_ollama_available() and has_hosted_creds):
+            logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint or self.model_id})...")
+            raw = self._hosted_inference(full_prompt)
+            return raw, f"hosted:{self.model_id}"
+
+        # 3. Fine-tuned Ollama model
         elif backend_mode == "finetuned_ollama" or active_provider == "finetuned_medgemma":
             if self.is_ollama_available():
                 model = settings.OLLAMA_MODEL
@@ -479,6 +487,10 @@ class MedGemmaService:
                 logger.info("Executing turn via local PEFT pipeline...")
                 raw = self._local_inference(full_prompt)
                 return raw, "peft:careflow-medgemma-final"
+            elif has_hosted_creds:
+                logger.info("Local Ollama unavailable; routing to hosted MedGemma endpoint...")
+                raw = self._hosted_inference(full_prompt)
+                return raw, f"hosted:{self.model_id}"
             elif settings.EXTERNAL_API_KEY:
                 logger.info("Fine-tuned Ollama unavailable; routing to External API...")
                 raw = self._call_external_api(system_prompt, user_prompt)
@@ -488,14 +500,15 @@ class MedGemmaService:
                     f"Fine-tuned Ollama model '{settings.OLLAMA_MODEL}' unavailable at {settings.OLLAMA_BASE_URL}."
                 )
 
-        else: # Default: 'base_ollama' (Local Base 'medgemma-4b-it')
+        # 4. Base Ollama / Default Local
+        else:
             model = getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
             if self.is_ollama_available(model):
                 logger.info(f"Executing turn via Base Ollama model '{model}'...")
                 raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
                 return raw, f"ollama:{model}"
-            elif self.endpoint:
-                logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint})...")
+            elif has_hosted_creds:
+                logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint or self.model_id})...")
                 raw = self._hosted_inference(full_prompt)
                 return raw, f"hosted:{self.model_id}"
             elif settings.EXTERNAL_API_KEY and "groq" not in (settings.EXTERNAL_API_BASE_URL or "").lower():
@@ -537,25 +550,30 @@ class MedGemmaService:
             provider=provider
         )
 
-        raw_response, executed_runtime = self._call_backend_slm(
-            full_prompt=full_prompt,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            provider=provider
-        )
-
         try:
+            raw_response, executed_runtime = self._call_backend_slm(
+                full_prompt=full_prompt,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                provider=provider
+            )
             cleaned = self._clean_json_text(raw_response)
             parsed = json.loads(cleaned)
             turn_obj = TriageTurnSchema(**parsed)
             clean_dict = turn_obj.model_dump()
+            clean_dict["validation_status"] = "valid"
+            clean_dict["executed_runtime"] = executed_runtime
+            clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
         except Exception as err:
-            logger.error(f"Failed to parse/validate raw SLM JSON: {err}. Raw: {raw_response[:200]}")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            logger.warning(f"Live SLM execution failed ({err}).")
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
+                logger.info("Falling back to deterministic clinical SLM engine.")
                 clean_dict = self._mock_slm_triage_turn(conversation_history, vitals or {})
                 clean_dict["validation_status"] = "mock_fallback"
+                clean_dict["executed_runtime"] = "mock_fallback"
+                clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
             else:
-                raise ModelInferenceError(f"SLM output violated schema contract: {err}")
+                raise ModelInferenceError(f"SLM execution/validation error: {err}")
 
         # Outbound pure neural translation to clean Devanagari Hindi
         q_en = str(clean_dict.get("next_question_en", "")).strip()
