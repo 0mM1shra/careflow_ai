@@ -359,49 +359,6 @@ with st.sidebar:
                     m["content"] = translate_question_text(m.get("content", ""), new_target)
         st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 🧠 Clinical SLM Engine")
-    try:
-        prov_info = api_client.get_model_providers()
-    except Exception:
-        prov_info = {
-            "finetuned_medgemma": {"status": "ready", "runtime": "ollama"},
-            "standard_medgemma": {"status": "ready", "runtime": "hosted_api"}
-        }
-
-    provider_choices = [
-        "Mode B: Fine-Tuned MedGemma (Local Ollama / LoRA)",
-        "Mode A: Standard MedGemma (Hosted / Fallback)"
-    ]
-    cur_p = st.session_state.get("selected_model_provider", "finetuned_medgemma")
-    p_idx = 0 if cur_p == "finetuned_medgemma" else 1
-
-    selected_choice = st.radio(
-        "Active Reasoning Model:",
-        options=provider_choices,
-        index=p_idx,
-        key="slm_provider_radio",
-        help="Select between local fine-tuned MedGemma SLM (Ollama GPU) or standard MedGemma endpoint."
-    )
-    chosen_key = "finetuned_medgemma" if "Fine-Tuned" in selected_choice else "standard_medgemma"
-    if chosen_key != st.session_state.selected_model_provider:
-        st.session_state.selected_model_provider = chosen_key
-        if st.session_state.case_id:
-            try:
-                api_client.set_case_model_provider(st.session_state.case_id, chosen_key)
-            except Exception as e:
-                st.sidebar.caption(f"Provider sync: {e}")
-        st.rerun()
-
-    # Provider health badge
-    p_meta = prov_info.get(chosen_key, {})
-    p_status = p_meta.get("status", "unknown")
-    p_rt = p_meta.get("runtime", "")
-    if p_status == "ready":
-        st.caption(f"🟢 **Live:** `{chosen_key}` via `{p_rt}`")
-    else:
-        st.caption(f"🟡 **Status:** `{p_status}` via `{p_rt}`")
-
 # Determine active UI dictionary and target language
 if "हिन्दी" in st.session_state.selected_lang:
     current_target_lang = "Hindi"
@@ -727,30 +684,10 @@ elif st.session_state.intake_step == "chatting":
     if not current_q:
         current_q = "Could you clarify any other symptoms you are experiencing?" if current_target_lang == "English" else "क्या आप अपने लक्षणों के बारे में कुछ और विस्तार से बता सकते हैं?"
 
-    # Browser-native zero-VRAM / zero-credit Text-to-Speech (Web Speech API)
-    clean_js_q = current_q.replace("'", "\\'").replace('"', '&quot;').replace('\n', ' ')
-    tts_lang = "hi-IN" if current_target_lang == "Hindi" else "en-US"
-    tts_btn_label = "🔊 सुनें (Audio)" if current_target_lang == "Hindi" else "🔊 Listen (Audio)"
-
     st.markdown(f'''
     <div class="chat-bubble-assistant" style="margin-right: 0; background: #E0F2FE; border-color: #BAE6FD; color: #0369A1;">
         <strong>{t["q_label"]}</strong><br/>
         <span style="font-size: 16px;">{current_q}</span>
-        <div style="margin-top: 8px;">
-            <button onclick="
-                if ('speechSynthesis' in window) {{
-                    window.speechSynthesis.cancel();
-                    var u = new SpeechSynthesisUtterance('{clean_js_q}');
-                    u.lang = '{tts_lang}';
-                    u.rate = 0.95;
-                    window.speechSynthesis.speak(u);
-                }} else {{
-                    alert('Web Speech API is not supported in this browser.');
-                }}
-            " style="background: #0284C7; color: white; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; font-weight: 500;">
-                {tts_btn_label}
-            </button>
-        </div>
     </div>
     ''', unsafe_allow_html=True)
 

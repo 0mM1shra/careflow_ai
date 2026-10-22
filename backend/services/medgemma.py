@@ -680,8 +680,14 @@ class MedGemmaService:
                 elif not any(k in all_prev_en for k in ["medication", "medicine", "taking", "chronic", "history"]):
                     q_en = "Do you have any chronic medical conditions (such as high blood pressure or diabetes), or are you currently taking any prescription medications?"
                 # Priority 6: Functional impairment
-                else:
+                elif not any(k in all_prev_en for k in ["normal activities", "walking", "resting", "interfering"]):
                     q_en = "Are these symptoms preventing you from performing normal activities, walking, or resting comfortably?"
+                # Priority 7: Additional focused symptoms
+                elif not any(k in all_prev_en for k in ["cough", "swelling", "feet", "legs", "vision"]):
+                    q_en = "Have you noticed any new cough, swelling in your feet or legs, or sudden changes in your vision?"
+                # Priority 8: Final intake inquiry
+                else:
+                    q_en = "Is there any other important medical symptom or detail you would like the doctor to know before we complete your intake?"
 
                 clean_dict["next_question_en"] = q_en
 
