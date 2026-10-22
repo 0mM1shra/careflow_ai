@@ -36,7 +36,7 @@ from backend.schemas.clinical import (
     MessageCreateRequest,
 
     CaseReviewRequest,
-
+    StatusUpdateRequest,
     PriorityOverrideRequest,
 
     CaseListItemResponse,
@@ -728,23 +728,63 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
 
 
+    # Record message audit event
+    msg_audit = AuditEvent(
+        case_id=case.id,
+        event_type="patient_message_added",
+        new_value_json=json.dumps({"content": content_clean, "source_type": req.source_type or "patient_typed"}),
+        reason=f"Patient sent message ({req.source_type or 'patient_typed'})",
+        actor_role="patient",
+        created_at=datetime.utcnow()
+    )
+    db.add(msg_audit)
+
     # Set chief complaint if empty
-
     if not case.chief_complaint:
-
         case.chief_complaint = content_clean
 
-
-
     # Collect all patient messages so far
-
     all_msgs = [m.content for m in case.messages if m.role == "patient"]
     assistant_msgs = [m.content for m in case.messages if m.role == "assistant"]
     current_evidence = json.loads(case.evidence_state_json or "{}")
     vitals = current_evidence.get("vitals", {})
     active_prov = getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
 
-    # Direct 6-Field SLM Turn Execution (zero 13-field bottleneck!)
+    # Run structured clinical extraction & update evidence state with audit event
+    try:
+        from backend.services.extraction import clinical_extraction_service
+        from backend.services.evidence_state import evidence_state_service
+        extraction = clinical_extraction_service.extract_clinical_facts(all_msgs)
+        evidence_state_service.update_evidence_state(
+            case=case,
+            extraction=extraction,
+            db=db,
+            source_message=msg,
+            actor_role="patient"
+        )
+        current_evidence = json.loads(case.evidence_state_json or "{}")
+    except Exception as ext_err:
+        logger.error(f"Error during structured fact extraction for case {case_id}: {ext_err}")
+        db.rollback()
+        case = db.query(Case).filter(Case.id == case_id).first()
+        case.ai_status = "failed"
+        case.priority_category = "ERR"
+        case.priority_reasons_json = json.dumps([f"Extraction error: {type(ext_err).__name__} - {str(ext_err)}"])
+        db.commit()
+        return {
+            "status": "success",
+            "message": msg.to_dict(),
+            "interim_priority": "ERR",
+            "rule_based_priority": "ERR",
+            "rule_based_triage": "ERR",
+            "ml_model_priority": "P3",
+            "ml_model_triage": "P3",
+            "ml_confidence": 0.0,
+            "warning_signs": ["Extraction failed"],
+            "is_emergency": False
+        }
+
+    # Direct 6-Field SLM Turn Execution
     slm_turn = {}
     try:
         slm_turn = medgemma_service.generate_slm_triage_turn(
@@ -1026,6 +1066,17 @@ async def upload_medical_document(
 
         case.evidence_state_json = json.dumps(current_evidence)
         case.ai_status = "ready"
+        ev_audit = AuditEvent(
+            case_id=case.id,
+            event_type="evidence_state_updated",
+            old_value_json=case.evidence_state_json,
+            new_value_json=json.dumps(current_evidence),
+            reason=f"Evidence state updated from uploaded document '{file.filename}'",
+            actor_role="ai_system",
+            created_at=datetime.utcnow()
+        )
+        db.add(ev_audit)
+        db.commit()
     except Exception as e:
         logger.error(f"Error during document SLM triage turn for case {case_id}: {e}")
         if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
@@ -1497,63 +1548,63 @@ def review_case(case_id: str, req: CaseReviewRequest, db: Session = Depends(get_
 
 
 
-    if req.approve:
-
+    if getattr(req, "status", None):
+        case.review_status = req.status
+        case.reviewed_at = datetime.utcnow()
+    elif req.approve:
         case.review_status = "approved"
-
         case.reviewed_at = datetime.utcnow()
-
     else:
-
         case.review_status = "reviewed"
-
         case.reviewed_at = datetime.utcnow()
-
-
 
     case.updated_at = datetime.utcnow()
 
-
-
     # Audit Trail
-
     audit = AuditEvent(
-
         case_id=case.id,
-
         event_type="case_approved" if req.approve else "case_reviewed",
-
         old_value_json=json.dumps(old_state),
-
         new_value_json=json.dumps({
-
             "review_status": case.review_status,
-
             "reviewer_summary": case.reviewer_summary,
-
             "reviewer_priority": case.reviewer_priority,
-
             "reviewer_notes": case.reviewer_notes
-
         }),
-
         reason="Healthcare reviewer updated notes and review status",
-
         actor_role="reviewer",
-
         created_at=datetime.utcnow()
-
     )
-
     db.add(audit)
-
     db.commit()
-
     db.refresh(case)
-
-
-
     return case.to_dict()
+
+
+@router.post("/cases/{case_id}/status")
+def update_case_status(case_id: str, req: StatusUpdateRequest, db: Session = Depends(get_db)):
+    """Allows clinician to update patient status between active, appointed with doctor, and done."""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+    
+    old_status = case.review_status
+    case.review_status = req.status
+    case.updated_at = datetime.utcnow()
+    
+    audit = AuditEvent(
+        case_id=case.id,
+        event_type="case_status_updated",
+        old_value_json=json.dumps({"review_status": old_status}),
+        new_value_json=json.dumps({"review_status": req.status}),
+        reason=f"Clinician updated patient workflow status to '{req.status}'",
+        actor_role="reviewer",
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(case)
+    return {"status": "success", "case_id": case_id, "review_status": req.status}
 
 
 
@@ -1635,6 +1686,39 @@ def override_priority(case_id: str, req: PriorityOverrideRequest, db: Session = 
 
 
 
+class FollowUpQuestionSendRequest(BaseModel):
+    question_text: str = Field(..., min_length=1, description="Clinician formulated follow-up question")
+    reviewer_name: Optional[str] = Field("Clinician Reviewer", description="Clinician identifier")
+
+
+@router.post("/cases/{case_id}/send-follow-up")
+def send_follow_up(case_id: str, req: FollowUpQuestionSendRequest, db: Session = Depends(get_db)):
+    """Appends a clinician-formulated follow-up question to the case conversation transcript and records an audit event."""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    msg = Message(
+        case_id=case_id,
+        role="assistant",
+        content=req.question_text.strip(),
+        source_type="clinician_follow_up",
+        created_at=datetime.utcnow()
+    )
+    db.add(msg)
+
+    audit = AuditEvent(
+        case_id=case_id,
+        event_type="follow_up_question_sent",
+        new_value_json=json.dumps({"question": req.question_text.strip(), "reviewer": req.reviewer_name}),
+        reason="Clinician sent targeted follow-up question to patient",
+        actor_role="reviewer",
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(case)
+    return {"status": "sent", "case_id": case.id, "question": req.question_text.strip()}
 
 
 @router.post("/cases/{case_id}/reopen")

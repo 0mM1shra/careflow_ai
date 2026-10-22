@@ -379,8 +379,8 @@ def _map_slm_and_vitals_to_dataframe(
         onset_str = str(slm_data.get("onset_and_duration", "")).lower()
         if any(w in onset_str for w in ["sudden", "acute", "today", "hour", "minute", "kal se", "कल से", "achanak"]):
             row["onset_acute"] = 1
-        elif not onset_str or onset_str == "not reported":
-            row["onset_acute"] = 1  # Default to conservative acute onset assumption
+        else:
+            row["onset_acute"] = 0
 
     # 3. Map System Flags (sys_*)
     # Check direct primary_system_flag from SLM with alias normalization
@@ -475,6 +475,19 @@ def predict_urgency_lgbm(
         if model is None:
             return "P3"
         df_features = _map_slm_and_vitals_to_dataframe(slm_json_output, lab_vitals_dict)
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(df_features)[0]
+            max_p = float(max(probs))
+            min_p = float(min(probs))
+            if max_p - min_p < 0.05:
+                # Flat distribution / tie (e.g. 0.25 on all 4 classes)
+                if df_features.get("pain_severe", [0])[0] == 1:
+                    pred_class = 1
+                elif df_features.get("onset_acute", [0])[0] == 1:
+                    pred_class = 2
+                else:
+                    pred_class = 3
+                return TARGET_PRIORITY_MAP.get(pred_class, "P3")
         pred_class = int(model.predict(df_features)[0])
         return TARGET_PRIORITY_MAP.get(pred_class, "P3")
     except Exception as e:
@@ -515,6 +528,17 @@ def predict_urgency_lgbm_with_details(
             for idx, prob in enumerate(probs):
                 tier = TARGET_PRIORITY_MAP.get(idx, f"Class_{idx}")
                 probabilities[tier] = round(float(prob), 4)
+
+            max_p = float(max(probs))
+            min_p = float(min(probs))
+            if max_p - min_p < 0.05:
+                # Flat distribution / tie (e.g. 0.25 on all 4 classes)
+                if df_features.get("pain_severe", [0])[0] == 1:
+                    pred_class = 1
+                elif df_features.get("onset_acute", [0])[0] == 1:
+                    pred_class = 2
+                else:
+                    pred_class = 3
 
         tier_str = TARGET_PRIORITY_MAP.get(pred_class, "P3")
         return {

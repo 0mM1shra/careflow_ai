@@ -23,4 +23,5 @@ __pycache__/
 evaluation_results/
 
 # Streamlit config/cache
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml

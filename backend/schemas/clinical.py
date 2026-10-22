@@ -204,7 +204,12 @@ class CaseReviewRequest(BaseModel):
     reviewer_summary: Optional[str] = Field(None, description="Edited or approved clinician summary")
     reviewer_priority: Optional[Literal["P0", "P1", "P2", "P3", "ERR"]] = Field(None, description="Reviewer assigned priority")
     reviewer_notes: Optional[str] = Field(None, description="Clinical notes or instructions")
+    status: Optional[str] = Field(None, description="Updated patient workflow status: active, appointed, done")
     approve: bool = Field(False, description="Set to true to mark case approved")
+
+
+class StatusUpdateRequest(BaseModel):
+    status: Literal["active", "appointed", "done", "pending", "reviewed", "approved"] = Field(..., description="Patient care status")
 
 
 class PriorityOverrideRequest(BaseModel):

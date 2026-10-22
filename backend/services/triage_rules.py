@@ -207,6 +207,14 @@ class DeterministicTriageEngine:
         escalation_applied = False
         escalation_reason = None
 
+        is_confident_ml = False
+        if ml_details and ml_details.get("probabilities"):
+            probs = ml_details["probabilities"]
+            pred_prob = probs.get(ml_model_triage, 0.0)
+            is_confident_ml = pred_prob >= 0.50
+        elif ml_confidence and ml_confidence >= 0.50:
+            is_confident_ml = True
+
         if rule_based_triage in ("P0", "P1"):
             final_triage = rule_based_triage
             if ml_model_triage and ml_model_triage in ("P2", "P3"):
@@ -221,23 +229,16 @@ class DeterministicTriageEngine:
                 escalation_applied = False
                 escalation_reason = f"Emergency tier {rule_based_triage} verified by clinical protocol."
         else:
-            if model_status == "available" and ml_model_triage:
+            if model_status == "available" and ml_model_triage in ("P0", "P1") and is_confident_ml:
                 final_triage = ml_model_triage
-                if ml_model_triage in ("P0", "P1"):
-                    escalation_applied = True
-                    escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
-                elif ml_model_triage != rule_based_triage:
-                    escalation_applied = True
-                    escalation_reason = f"ML model triage ({ml_model_triage}) calibrated from clinical training distribution."
-                else:
-                    escalation_applied = False
-                    escalation_reason = f"Concordant tier {final_triage} between ML model and clinical protocol."
+                escalation_applied = True
+                escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
             else:
                 final_triage = rule_based_triage
-                escalation_applied = True
-                escalation_reason = "Model unavailable fallback: Assigned via deterministic clinical protocol due to ML classifier unavailability."
+                escalation_applied = False
+                escalation_reason = None
 
-        rule_result.priority_category = final_triage
+        rule_result.priority_category = rule_based_triage
         rule_result.final_triage = final_triage
         rule_result.rule_based_priority = rule_based_triage
         rule_result.rule_based_triage = rule_based_triage
@@ -245,7 +246,8 @@ class DeterministicTriageEngine:
         rule_result.ml_model_triage = ml_model_triage
         rule_result.escalation_applied = escalation_applied
         rule_result.escalation_reason = escalation_reason
-        rule_result.decision_path = "protocol_safety_guardrail" if (rule_based_triage in ("P0", "P1") or escalation_applied) else "model_urgency_reasoning"
+        if escalation_applied and rule_based_triage not in ("P0", "P1"):
+            rule_result.decision_path = "multidimensional_acuity_synthesis"
         rule_result.model_status = model_status
         rule_result.imputed_features = imputed_features
         return rule_result
@@ -527,16 +529,6 @@ class DeterministicTriageEngine:
             p1_warning_signs.append("Rapid Deterioration: Acute onset with clinical worsening")
             p1_reasons.append("Multi-factor acuity synthesis detected acute onset with clinical deterioration and systemic involvement.")
 
-        if model_p1_triggers or protocol_p1_triggers or acuity_p1_triggers:
-            combined_p1 = protocol_p1_triggers + model_p1_triggers + acuity_p1_triggers
-            has_protocol_specific_flag = any(t.rule_id in ("RULE-P1-INF-01", "RULE-P1-CARD-05", "RULE-P1-ABD-03", "RULE-P1-RESP-04", "RULE-P1-GI-06") for t in protocol_p1_triggers)
-            if model_p1_triggers:
-                dec_path = "model_urgency_reasoning"
-            elif has_protocol_specific_flag:
-                dec_path = "protocol_safety_guardrail"
-            else:
-                dec_path = "multidimensional_acuity_synthesis"
-
         # Check Continuous Vital Signs Urgent Indicators (ESI Level 2 / Urgent Acuity)
         if "heart_rate" not in active_imputed:
             hr = active_vitals.get("heart_rate")
@@ -569,8 +561,17 @@ class DeterministicTriageEngine:
                 p1_reasons.append(f"Triggered RULE-P1-VITAL-TEMP (Hyperpyrexia): Temperature {temp}°F exceeds 104.0°F")
 
         # Check SLM-extracted severe pain flag
-        slm_features = evidence_state.get("slm_extraction", {})
-        if (slm_features.get("red_flag_severe_pain") or evidence_state.get("symptoms", {}).get("severe_pain") == "reported") and not any(t.rule_id == "RULE-P1-PAIN-02" for t in protocol_p1_triggers + acuity_p1_triggers):
+        slm_features = evidence_state.get("slm_extraction")
+        if not isinstance(slm_features, dict):
+            slm_features = {}
+        symptoms_data = evidence_state.get("symptoms")
+        severe_pain_reported = False
+        if isinstance(symptoms_data, dict):
+            severe_pain_reported = (symptoms_data.get("severe_pain") == "reported")
+        elif isinstance(symptoms_data, list):
+            severe_pain_reported = ("severe_pain" in symptoms_data)
+
+        if (slm_features.get("red_flag_severe_pain") or severe_pain_reported) and not any(t.rule_id == "RULE-P1-PAIN-02" for t in protocol_p1_triggers + acuity_p1_triggers):
             trigger = TriageTrigger(
                 rule_id="RULE-P1-PAIN-02",
                 rule_name="Severe Uncontrolled Pain",
@@ -582,6 +583,17 @@ class DeterministicTriageEngine:
             protocol_p1_triggers.append(trigger)
             p1_warning_signs.append("Severe Uncontrolled Pain: SLM severe pain flag")
             p1_reasons.append("Triggered RULE-P1-PAIN-02: SLM identified red_flag_severe_pain=True")
+
+        if model_p1_triggers or protocol_p1_triggers or acuity_p1_triggers:
+            combined_p1 = protocol_p1_triggers + model_p1_triggers + acuity_p1_triggers
+            has_protocol_specific_flag = any(t.rule_id in ("RULE-P1-INF-01", "RULE-P1-CARD-05", "RULE-P1-ABD-03", "RULE-P1-RESP-04", "RULE-P1-GI-06") for t in protocol_p1_triggers)
+            if model_p1_triggers:
+                dec_path = "model_urgency_reasoning"
+            elif has_protocol_specific_flag:
+                dec_path = "protocol_safety_guardrail"
+            else:
+                dec_path = "multidimensional_acuity_synthesis"
+
             return TriageResult(
                 priority_category="P1",
                 rule_based_priority="P1",

@@ -179,7 +179,7 @@ class MedGemmaService:
             raise ProviderUnavailableError(f"Ollama execution error: {e}")
 
     def _call_external_api(self, system_content: str, user_content: str) -> str:
-        """Executes inference against an OpenAI-compatible hosted API endpoint (Groq, OpenRouter, vLLM, etc.)."""
+        """Executes inference against an OpenAI-compatible hosted API endpoint (OpenRouter, vLLM, Hugging Face, etc.)."""
         if not settings.EXTERNAL_API_KEY:
             raise ProviderUnavailableError("EXTERNAL_API_KEY is not configured in .env")
 
@@ -195,7 +195,7 @@ class MedGemmaService:
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.1,
-            "max_tokens": 150,
+            "max_tokens": 1024,
             "response_format": {"type": "json_object"}
         }
         try:
@@ -494,14 +494,14 @@ class MedGemmaService:
                 logger.info(f"Executing turn via Base Ollama model '{model}'...")
                 raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
                 return raw, f"ollama:{model}"
-            elif settings.EXTERNAL_API_KEY:
-                logger.info("Base Ollama unavailable; falling back to configured External API...")
-                raw = self._call_external_api(system_prompt, user_prompt)
-                return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
             elif self.endpoint:
                 logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint})...")
                 raw = self._hosted_inference(full_prompt)
                 return raw, f"hosted:{self.model_id}"
+            elif settings.EXTERNAL_API_KEY and "groq" not in (settings.EXTERNAL_API_BASE_URL or "").lower():
+                logger.info("Base Ollama and hosted endpoint unavailable; falling back to external API...")
+                raw = self._call_external_api(system_prompt, user_prompt)
+                return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
             else:
                 raise ProviderUnavailableError(
                     f"Base Ollama model '{model}' unavailable at {settings.OLLAMA_BASE_URL}."
@@ -522,12 +522,9 @@ class MedGemmaService:
         Outputs strict, validated JSON matching the 6-field contract with zero mock fallbacks.
         """
         if self.mode == "mock":
-            if provider == "standard_medgemma":
-                m_turn = self._mock_standard_slm_triage_turn(conversation_history, vitals or {})
-            else:
-                m_turn = self._mock_slm_triage_turn(conversation_history, vitals or {})
+            m_turn = self._mock_slm_triage_turn(conversation_history, vitals or {})
             m_turn["validation_status"] = "valid"
-            m_turn["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+            m_turn["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
             m_turn["executed_runtime"] = "mock_emulator"
             return m_turn
 
@@ -855,13 +852,13 @@ class MedGemmaService:
                 sys_scores["sys_systemic"] += 3
 
         # EENT indicators
-        for term in ["sore throat", "gale me", "गले में", "ear pain", "kaan dard", "hearing", "eye pain", "aankh", "runny nose", "chheenk", "sinus"]:
+        for term in ["sore throat", "gale me", "गले में", "ear", "ear pain", "kaan", "kaan dard", "blocked", "hearing", "eye", "eye pain", "aankh", "runny nose", "chheenk", "sinus"]:
             if term in full_text:
                 sys_scores["sys_eent"] += 3
 
-        # Find primary system with highest score, fallback to cardiopulmonary or systemic
+        # Find primary system with highest score, fallback to systemic
         best_sys = max(sys_scores.items(), key=lambda x: x[1])
-        primary_sys = best_sys[0] if best_sys[1] > 0 else "sys_cardiopulmonary"
+        primary_sys = best_sys[0] if best_sys[1] > 0 else "sys_systemic"
 
         # 2. Extract Red Flags
         # Severe pain check
@@ -911,9 +908,9 @@ class MedGemmaService:
                     else "Are you able to speak in full sentences without losing your breath, and does lying flat make it worse?"
                 ),
                 "hi": (
-                    "Kya chhati ka dabaav jabde, gardan ya baaye haath tak jaa raha hai, ya saans phool rahi hai?"
+                    "क्या सीने का दबाव जबड़े, गर्दन या बाएं हाथ तक फैल रहा है, या सांस फूल रही है?"
                     if "chest" in full_text or "seene" in full_text
-                    else "Kya aap bina saans toote poore vakya bol paa rahe hain, aur letne par saans zyada phoolti hai?"
+                    else "क्या आप बिना सांस तोड़े पूरे वाक्य बोल पा रहे हैं, और क्या लेटने पर सांस ज्यादा फूलती है?"
                 )
             },
             "sys_neurological": {
@@ -923,9 +920,9 @@ class MedGemmaService:
                     else "Do you have any neck stiffness, pain when bending your head, or changes in your vision?"
                 ),
                 "hi": (
-                    "Kya aapne chehre par tedhapan, haath me kamzori ya bolne me ladkhadahat dekhi hai?"
+                    "क्या आपने चेहरे पर टेढ़ापन, हाथ में कमजोरी या बोलने में लड़खड़ाहट देखी है?"
                     if any(w in full_text for w in ["weak", "face", "numb", "speech"])
-                    else "Kya aapki gardan me akadpan, aage jhukane me dard, ya dekhne me koi badlaav hai?"
+                    else "क्या आपकी गर्दन में अकड़न, सिर आगे झुकाने में दर्द, या देखने में कोई बदलाव है?"
                 )
             },
             "sys_gastrointestinal": {
@@ -935,30 +932,30 @@ class MedGemmaService:
                     else "Where exactly in your abdomen is the pain located, and are you able to keep water down without vomiting?"
                 ),
                 "hi": (
-                    "Kya ulti me chamkeela laal khoon ya dark coffee grounds jaisa kuch tha?"
+                    "क्या उल्टी में चमकीला लाल खून या कॉफी के रंग जैसा गहरा पदार्थ निकला था?"
                     if any(w in full_text for w in ["vomit", "ulti"])
-                    else "Pet me dard theek kis jagah par hai, aur kya aap pani bina ulti ke pacha pa rahe hain?"
+                    else "पेट में दर्द ठीक किस जगह पर है, और क्या आप पानी बिना उल्टी किए पचा पा रहे हैं?"
                 )
             },
             "sys_urogenital": {
                 "en": "Have you noticed any blood in your urine, back pain, or do you have an accompanying fever?",
-                "hi": "Kya aapne peshab me khoon dekha hai, peeth me dard hai ya bukhar aa raha hai?"
+                "hi": "क्या आपने पेशाब में खून देखा है, पीठ में दर्द है या साथ में बुखार आ रहा है?"
             },
             "sys_musculoskeletal": {
                 "en": "Have you experienced any loss of bladder or bowel control, or progressive weakness in your legs?",
-                "hi": "Kya peshab ya mal tyaag par aapka niyantran kam hua hai, ya pairon me badhti kamzori hai?"
+                "hi": "क्या पेशाब या शौच पर आपका नियंत्रण कम हुआ है, या पैरों में बढ़ती कमजोरी महसूस हो रही है?"
             },
             "sys_dermatological": {
                 "en": "Are you experiencing any swelling in your lips, tongue, or difficulty swallowing or breathing?",
-                "hi": "Kya aapke hoth, jeebh me sujan ya nikalne ya saans lene me takleef hai?"
+                "hi": "क्या आपके होंठ या जीभ में सूजन है, या निगलने और सांस लेने में तकलीफ हो रही है?"
             },
             "sys_systemic": {
                 "en": "Have you noticed any confusion, severe drowsiness, extreme shivering, or a new rash?",
-                "hi": "Kya aapko behoshi, bahut zyada neend, tez kapkapi, ya sharir par koi naye daane dikhe hain?"
+                "hi": "क्या आपको अत्यधिक सुस्ती, कंपकंपी, नया चकत्ता या भ्रम महसूस हो रहा है?"
             },
             "sys_eent": {
                 "en": "Are you experiencing any sudden hearing loss, ear discharge, or difficulty swallowing liquids?",
-                "hi": "Kya achanak sunai kam dena, kaan se peep aana ya pani nigalne me takleef ho rahi hai?"
+                "hi": "क्या अचानक सुनाई देना कम हुआ है, कान से मवाद बह रहा है या तरल निगलने में तकलीफ है?"
             }
         }
 
@@ -1009,7 +1006,7 @@ class MedGemmaService:
 
         timeout = settings.MODEL_TIMEOUT_SECONDS
         try:
-            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(target_endpoint, headers=headers, json=payload, timeout=timeout)
             # If 400 or 422, try alternate schema payload (HF vs OpenAI format)
             if resp.status_code in (400, 422) and not is_openai_style:
                 alt_payload = {
@@ -1018,14 +1015,21 @@ class MedGemmaService:
                     "temperature": 0.1,
                     "max_tokens": 1024,
                 }
-                resp = requests.post(self.endpoint, headers=headers, json=alt_payload, timeout=timeout)
+                resp = requests.post(target_endpoint, headers=headers, json=alt_payload, timeout=timeout)
             if resp.status_code == 401:
                 raise ModelInferenceError("Hosted endpoint authentication failed (HTTP 401). Verify your MEDGEMMA_API_KEY or HF_TOKEN in .env.")
             elif resp.status_code == 403:
+                err_msg = resp.text
+                if "Inference Providers" in err_msg or "permissions" in err_msg:
+                    raise ModelInferenceError(
+                        "Hugging Face token missing Inference Provider permissions. "
+                        "When creating your Hugging Face token at https://huggingface.co/settings/tokens, "
+                        "check 'Make calls to the serverless Inference API' / 'Inference Providers'."
+                    )
                 raise ModelInferenceError(
                     f"Access forbidden (HTTP 403) for model '{self.model_id}'. "
                     f"Ensure you have accepted the model license terms at https://huggingface.co/{self.model_id} "
-                    f"and your token has 'read' permissions."
+                    f"and your token has 'read' and 'inference' permissions."
                 )
             elif resp.status_code == 404:
                 raise ModelInferenceError(f"Hosted endpoint not found (HTTP 404) at '{target_endpoint}'. Check MEDGEMMA_ENDPOINT URL.")

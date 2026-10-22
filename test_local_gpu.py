@@ -12,6 +12,7 @@ print("=" * 70)
 
 # 1. Hardware & PyTorch CUDA Check
 print("\n[1/4] Checking Physical Hardware & PyTorch...")
+cuda_ok = False
 try:
     import torch
     print(f"  - PyTorch version: {torch.__version__}")
@@ -29,6 +30,7 @@ try:
         print("      pip install bitsandbytes")
 except ImportError:
     print("  [!] PyTorch is not installed.")
+    cuda_ok = False
 
 # 2. Fine-Tuned LoRA Adapter Check
 print("\n[2/4] Checking Fine-Tuned LoRA Adapter ('careflow-medgemma-final')...")
@@ -68,7 +70,7 @@ print(f"  - Has Adapter: {status['has_adapter']}")
 print(f"  - Ready: {status['is_ready']}")
 
 print("\n" + "=" * 70)
-if torch.cuda.is_available():
+if cuda_ok:
     print("  Status: GPU READY FOR FULL POWER LOCAL INFERENCE!")
 else:
     print("  Status: Hardware detected, awaiting PyTorch CUDA wheel.")

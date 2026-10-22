@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import requests
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
@@ -6,11 +8,60 @@ from dotenv import load_dotenv
 load_dotenv()
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 
+_backend_started = False
+_backend_lock = threading.Lock()
+
+def _ensure_backend_running(backend_url: str):
+    """
+    Ensures the FastAPI backend is running.
+    On Streamlit Community Cloud (where only Streamlit executes), this automatically
+    spawns uvicorn in a background thread inside the container so everything works
+    out-of-the-box without requiring a separate server.
+    """
+    global _backend_started
+    if _backend_started:
+        return
+    if "127.0.0.1" not in backend_url and "localhost" not in backend_url:
+        return
+
+    with _backend_lock:
+        if _backend_started:
+            return
+        try:
+            r = requests.get(f"{backend_url}/health", timeout=1)
+            if r.status_code == 200:
+                _backend_started = True
+                return
+        except Exception:
+            pass
+
+        def _run_server():
+            try:
+                import uvicorn
+                from backend.main import app as fastapi_app
+                uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, log_level="warning")
+            except Exception as e:
+                print(f"[CareFlow] Background FastAPI startup notice: {e}")
+
+        server_thread = threading.Thread(target=_run_server, daemon=True)
+        server_thread.start()
+
+        # Brief spin-wait for backend startup
+        for _ in range(12):
+            time.sleep(0.4)
+            try:
+                if requests.get(f"{backend_url}/health", timeout=1).status_code == 200:
+                    _backend_started = True
+                    break
+            except Exception:
+                pass
+
 class CareFlowAPIClient:
     """Client for CareFlow FastAPI backend endpoints."""
 
     def __init__(self, base_url: str = BACKEND_URL):
         self.base_url = base_url
+        _ensure_backend_running(self.base_url)
 
     def get_health(self) -> Dict[str, Any]:
         try:
@@ -168,6 +219,11 @@ class CareFlowAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_case_status(self, case_id: str, status: str) -> Dict[str, Any]:
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/status", json={"status": status}, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
     def mark_case_done(self, case_id: str, notes: Optional[str] = None) -> Dict[str, Any]:
         params = {}
         if notes:
@@ -241,5 +297,22 @@ class CareFlowAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    def send_follow_up_question(
+        self,
+        case_id: str,
+        question_text: str,
+        reviewer_name: str = "Clinician Reviewer"
+    ) -> Dict[str, Any]:
+        """Dispatches an edit-ready clinician follow-up question to the patient case."""
+        payload = {"question_text": question_text, "reviewer_name": reviewer_name}
+        try:
+            resp = requests.post(f"{self.base_url}/cases/{case_id}/send-follow-up", json=payload, timeout=15)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return self.send_message(case_id, content=question_text, source_type="clinician_follow_up")
+
 api_client = CareFlowAPIClient()
+
 

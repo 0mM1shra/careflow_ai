@@ -16,7 +16,7 @@ deepgram-sdk>=3.0.0
 
 # Document Processing & OCR (PDF, JPEG, PNG)
 pypdf>=4.0.0
-winocr>=0.0.15
+winocr>=0.0.15; sys_platform == 'win32'
 pillow>=10.0.0
 
 # Tabular Machine Learning & Triage Classifier
