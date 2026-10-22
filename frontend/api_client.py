@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+CLIENT_MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT_SECONDS", "300"))
 
 _backend_started = False
 _backend_lock = threading.Lock()
@@ -150,7 +151,7 @@ class CareFlowAPIClient:
             "transcription_confidence": conf,
             "is_confirmed": is_confirmed
         }
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=45)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/messages", json=payload, timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
@@ -170,7 +171,7 @@ class CareFlowAPIClient:
             params["model_size"] = model_size
         if translate_to_english:
             params["translate_to_english"] = "true"
-        resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=45)
+        resp = requests.post(f"{self.base_url}/transcribe-audio", files=files, params=params, timeout=CLIENT_MODEL_TIMEOUT)
         if not resp.ok:
             try:
                 err_detail = resp.json().get("detail", resp.text)
@@ -181,28 +182,28 @@ class CareFlowAPIClient:
 
     def text_to_speech(self, text: str, model: Optional[str] = "aura-asteria-en") -> bytes:
         payload = {"text": text, "model": model or "aura-asteria-en"}
-        resp = requests.post(f"{self.base_url}/text-to-speech", json=payload, timeout=30)
+        resp = requests.post(f"{self.base_url}/text-to-speech", json=payload, timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.content
 
     def preview_document_extraction(self, case_id: str, file_bytes: bytes, filename: str) -> Dict[str, Any]:
         files = {"file": (filename, file_bytes)}
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/extract-document", files=files, timeout=40)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/extract-document", files=files, timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
     def get_next_question(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=45)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/next-question", timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
     def submit_case(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/submit", timeout=30)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/submit", timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
     def regenerate_summary(self, case_id: str) -> Dict[str, Any]:
-        resp = requests.post(f"{self.base_url}/cases/{case_id}/generate-summary", timeout=30)
+        resp = requests.post(f"{self.base_url}/cases/{case_id}/generate-summary", timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
@@ -295,7 +296,7 @@ class CareFlowAPIClient:
             "vitals": vitals or {},
             "preferred_language": preferred_language
         }
-        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=45)
+        resp = requests.post(f"{self.base_url}/model-comparison", json=payload, timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
@@ -315,7 +316,7 @@ class CareFlowAPIClient:
             "vitals": vitals or {},
             "preferred_language": preferred_language
         }
-        resp = requests.post(f"{self.base_url}/ai-pipeline/run", json=payload, timeout=25)
+        resp = requests.post(f"{self.base_url}/ai-pipeline/run", json=payload, timeout=CLIENT_MODEL_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 

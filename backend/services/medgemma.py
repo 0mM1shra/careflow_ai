@@ -3,11 +3,12 @@ import json
 import re
 import time
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union, Tuple, Literal
 from pydantic import BaseModel, Field
 import requests
-from backend.config import settings
+from backend.config import settings, BASE_DIR
 from backend.services.safety import safety_service
 from backend.services.translation import translation_service
 
@@ -81,6 +82,11 @@ class MedGemmaService:
         self.local_quantization = settings.MEDGEMMA_LOCAL_QUANTIZATION
         self._local_pipeline = None
 
+        # Local Quantized GGUF Neural Model Engine (llama-cpp-python)
+        self.local_gguf_path = Path(getattr(settings, "MEDGEMMA_LOCAL_GGUF_PATH", "models/medgemma-4b-it-Q4_K_M.gguf"))
+        self._llama_model = None
+        self._llama_lock = threading.Lock()
+
         # Inspect fine-tuned LoRA adapter if present
         self.has_adapter = False
         self.adapter_config: Dict[str, Any] = {}
@@ -93,7 +99,76 @@ class MedGemmaService:
             except Exception as e:
                 logger.warning(f"Could not parse adapter_config.json: {e}")
 
-        logger.info(f"Initialized MedGemmaService in '{self.mode}' mode with model '{self.model_id}' (has_adapter={self.has_adapter})")
+        logger.info(
+            f"Initialized MedGemmaService in '{self.mode}' mode with model '{self.model_id}' "
+            f"(has_local_gguf={self.has_local_gguf()}, has_adapter={self.has_adapter})"
+        )
+
+    def has_local_gguf(self) -> bool:
+        """Checks if quantized MedGemma GGUF weights exist locally on disk (>1 GB)."""
+        target = self.local_gguf_path
+        if not target.is_absolute():
+            target = settings.BASE_DIR / target
+        if target.exists() and target.stat().st_size > 1000000000:
+            return True
+        alt = settings.BASE_DIR / "models" / "medgemma-4b-it-Q4_K_M.gguf"
+        return alt.exists() and alt.stat().st_size > 1000000000
+
+    def _get_or_load_llama(self):
+        """Lazy-loads llama_cpp Llama model instance with CPU AVX2 or CUDA GPU acceleration."""
+        if self._llama_model is not None:
+            return self._llama_model
+
+        with self._llama_lock:
+            if self._llama_model is not None:
+                return self._llama_model
+
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                raise ModelInferenceError("llama-cpp-python is required for local SLM execution. Please install llama-cpp-python.")
+
+            target = self.local_gguf_path
+            if not target.is_absolute():
+                target = settings.BASE_DIR / target
+            if not target.exists() or target.stat().st_size < 1000000000:
+                alt = settings.BASE_DIR / "models" / "medgemma-4b-it-Q4_K_M.gguf"
+                if alt.exists() and alt.stat().st_size > 1000000000:
+                    target = alt
+                else:
+                    raise ModelInferenceError(f"Local MedGemma GGUF weights not found at {target}")
+
+            has_cuda = _is_cuda_available()
+            n_gpu = -1 if has_cuda else 0
+            n_threads = min(8, os.cpu_count() or 4)
+
+            logger.info(
+                f"Loading Google MedGemma 4B GGUF ({target.name}) into memory "
+                f"(device={'CUDA GPU' if has_cuda else 'CPU AVX2'}, threads={n_threads}, gpu_layers={n_gpu})..."
+            )
+            self._llama_model = Llama(
+                model_path=str(target),
+                n_ctx=2048,
+                n_threads=n_threads,
+                n_gpu_layers=n_gpu,
+                verbose=False
+            )
+            logger.info("Google MedGemma 4B GGUF model loaded successfully into active memory.")
+            return self._llama_model
+
+    def _call_local_gguf(self, prompt: str, max_tokens: int = 180) -> str:
+        """Executes real neural forward pass using local llama-cpp-python engine."""
+        llama = self._get_or_load_llama()
+        with self._llama_lock:
+            output = llama(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=0.1,
+                top_p=0.9,
+                stop=["<end_of_turn>", "<start_of_turn>", "<eos>"]
+            )
+            text = output["choices"][0]["text"].strip()
+            return text
 
     def is_ollama_available(self, model_name: Optional[str] = None) -> bool:
         """Checks if local Ollama service is reachable and has the requested model registered."""
@@ -111,9 +186,10 @@ class MedGemmaService:
         """Returns the readiness status of both standard_medgemma and finetuned_medgemma providers."""
         has_cuda = _is_cuda_available()
         ollama_ok = self.is_ollama_available()
+        has_gguf = self.has_local_gguf()
         is_local = self.mode in ("mock", "local")
-        std_ready = True if is_local else bool(self.endpoint)
-        ft_ready = True if is_local else (ollama_ok or self.has_adapter)
+        std_ready = True if (is_local or has_gguf) else bool(self.endpoint)
+        ft_ready = True if (is_local or has_gguf) else (ollama_ok or self.has_adapter)
 
         return {
             "standard_medgemma": {
@@ -121,7 +197,7 @@ class MedGemmaService:
                 "name": "Google MedGemma (Standard Instruction-Tuned)",
                 "model_id": settings.STANDARD_MEDGEMMA_MODEL_ID,
                 "is_available": std_ready,
-                "endpoint_type": "local_cpu_engine" if (is_local and not has_cuda) else ("peft_local_gpu" if has_cuda else ("remote_hosted_api" if self.endpoint else "local_clinical_engine")),
+                "endpoint_type": "local_neural_slm:medgemma-4b" if has_gguf else ("local_cpu_engine" if (is_local and not has_cuda) else ("peft_local_gpu" if has_cuda else ("remote_hosted_api" if self.endpoint else "local_clinical_engine"))),
                 "has_endpoint": bool(self.endpoint),
                 "requires_api_key": False if is_local else bool(self.endpoint and not self.api_key),
             },
@@ -130,12 +206,13 @@ class MedGemmaService:
                 "name": "CareFlow Fine-Tuned MedGemma 4B (careflow-medgemma-final)",
                 "model_id": f"ollama:{settings.OLLAMA_MODEL}" if ollama_ok else "careflow-medgemma-final",
                 "is_available": ft_ready,
-                "runtime": "ollama_local_gpu" if ollama_ok else ("peft_local_gpu" if (self.has_adapter and has_cuda) else "local_cpu_engine"),
+                "runtime": "local_neural_slm:medgemma-4b" if has_gguf else ("ollama_local_gpu" if ollama_ok else ("peft_local_gpu" if (self.has_adapter and has_cuda) else "local_cpu_engine")),
                 "ollama_endpoint": settings.OLLAMA_BASE_URL,
                 "ollama_model": settings.OLLAMA_MODEL,
                 "has_ollama": ollama_ok,
                 "has_adapter": self.has_adapter,
                 "has_cuda": has_cuda,
+                "has_local_gguf": has_gguf,
                 "adapter_rank": self.adapter_config.get("r", 8),
                 "adapter_alpha": self.adapter_config.get("lora_alpha", 16),
             },
@@ -243,7 +320,9 @@ class MedGemmaService:
             "asr_model_size": settings.ASR_MODEL_SIZE,
             "ocr_engine": settings.OCR_ENGINE,
             "hf_home": settings.HF_HOME or "default",
-            "is_ready": True if self.mode in ("mock", "local") else bool(self.endpoint or prov_status.get("finetuned_medgemma", {}).get("is_available")),
+            "has_local_gguf": self.has_local_gguf(),
+            "local_gguf_path": str(self.local_gguf_path),
+            "is_ready": True if (self.mode in ("mock", "local") and (self.has_local_gguf() or prov_status.get("standard_medgemma", {}).get("is_available"))) else bool(self.endpoint or prov_status.get("finetuned_medgemma", {}).get("is_available")),
             "providers": prov_status,
             "memory_guidance": (
                 "Google MedGemma 4B with fine-tuned LoRA adapter (careflow-medgemma-final). "
@@ -331,9 +410,16 @@ class MedGemmaService:
         elif mode == "hosted":
             return self._hosted_inference(full_prompt)
         elif self.mode in ("local", "peft"):
-            if self.is_ollama_available():
+            if self.has_local_gguf():
+                logger.info("Executing prompt via Local Neural MedGemma 4B SLM (llama-cpp)...")
+                return self._call_local_gguf(full_prompt, max_tokens=256)
+            if _is_cuda_available() and self.has_adapter:
+                return self._local_inference(full_prompt)
+            elif self.is_ollama_available():
                 return self._call_ollama(full_prompt)
-            return self._local_inference(full_prompt)
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+                return self._mock_inference(full_prompt)
+            raise ModelInferenceError("No local neural weights found and mock fallback is disabled.")
         else:
             raise ModelInferenceError(f"Unsupported MEDGEMMA_MODE: '{mode}'. Use 'mock', 'hosted', or 'local'.")
 
@@ -476,6 +562,10 @@ class MedGemmaService:
 
         # 1. Local Mode First (Zero Cloud Overhead, Auto-detects GPU)
         if self.mode in ("local", "mock") or backend_mode == "local":
+            if self.has_local_gguf():
+                logger.info("Executing turn via Local Neural MedGemma 4B SLM (llama-cpp CPU/GPU-ready)...")
+                raw = self._call_local_gguf(full_prompt, max_tokens=180)
+                return raw, "local_neural_slm:medgemma-4b-it"
             has_cuda = _is_cuda_available()
             if has_cuda and self.has_adapter:
                 logger.info("Executing turn via Local GPU PEFT pipeline (CUDA acceleration enabled)...")
@@ -487,12 +577,15 @@ class MedGemmaService:
                 raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
                 return raw, f"ollama:{model}"
             else:
-                logger.info("Executing turn via Local Clinical Engine (Optimized for CPU, GPU-Ready)...")
-                m_turn = self._mock_slm_triage_turn(
-                    conversation_history=[user_prompt],
-                    vitals={},
-                )
-                return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
+                if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+                    logger.info("Executing turn via Local Clinical Engine (fallback)...")
+                    m_turn = self._mock_slm_triage_turn(
+                        conversation_history=[user_prompt],
+                        vitals={},
+                    )
+                    return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
+                else:
+                    raise ModelInferenceError("No local neural weights found and mock fallback is disabled.")
 
         # 2. Check explicit External API override
         elif backend_mode == "external_api" or active_provider == "external_api":
@@ -508,12 +601,72 @@ class MedGemmaService:
 
         # 4. Default fallback
         else:
-            logger.info("Executing turn via Local Clinical Engine...")
-            m_turn = self._mock_slm_triage_turn(
-                conversation_history=[user_prompt],
-                vitals={},
-            )
-            return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+                logger.info("Executing turn via Local Clinical Engine...")
+                m_turn = self._mock_slm_triage_turn(
+                    conversation_history=[user_prompt],
+                    vitals={},
+                )
+                return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
+            else:
+                raise ModelInferenceError("Requested model provider unavailable and mock fallback is disabled.")
+
+    def _normalize_triage_turn_payload(
+        self,
+        parsed: Dict[str, Any],
+        conversation_history: List[str],
+        vitals: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Normalizes neural SLM JSON output to conform strictly to TriageTurnSchema constraints."""
+        valid_systems = [
+            "sys_cardiopulmonary", "sys_neurological", "sys_gastrointestinal",
+            "sys_urogenital", "sys_musculoskeletal", "sys_dermatological",
+            "sys_systemic", "sys_eent", "cardiopulmonary", "neurological",
+            "gastrointestinal", "musculoskeletal", "dermatological",
+            "renal_urological", "systemic", "other"
+        ]
+        # 1. Primary system flag
+        sys_flag = str(parsed.get("primary_system_flag", "")).strip().lower()
+        if sys_flag not in valid_systems:
+            found = False
+            for vs in valid_systems:
+                if vs in sys_flag or sys_flag in vs:
+                    sys_flag = vs
+                    found = True
+                    break
+            if not found:
+                sys_flag = "sys_cardiopulmonary" if any("chest" in str(m).lower() for m in conversation_history) else "sys_systemic"
+        parsed["primary_system_flag"] = sys_flag
+
+        # 2. Red flags
+        pain_val = parsed.get("red_flag_severe_pain", False)
+        parsed["red_flag_severe_pain"] = bool(pain_val) if isinstance(pain_val, (bool, int)) else str(pain_val).lower() in ("true", "1", "yes")
+
+        onset_val = parsed.get("red_flag_acute_onset", False)
+        parsed["red_flag_acute_onset"] = bool(onset_val) if isinstance(onset_val, (bool, int)) else str(onset_val).lower() in ("true", "1", "yes")
+
+        # 3. Target triage boundary
+        boundary = str(parsed.get("target_triage_boundary", "P2_P3")).upper().strip()
+        valid_boundaries = ["P0", "P1", "P2", "P3", "P0_P1", "P1_P2", "P2_P3"]
+        if boundary not in valid_boundaries:
+            if "P0" in boundary:
+                boundary = "P0" if "P1" not in boundary else "P0_P1"
+            elif "P1" in boundary:
+                boundary = "P1_P2"
+            else:
+                boundary = "P2_P3"
+        parsed["target_triage_boundary"] = boundary
+
+        # 4. Next questions
+        q_en = str(parsed.get("next_question_en", "")).strip()
+        if len(q_en) < 5:
+            q_en = "Could you tell me how long you have been having these symptoms and if they started suddenly?"
+        parsed["next_question_en"] = q_en
+
+        q_hi = str(parsed.get("next_question_hi", "")).strip()
+        parsed["next_question_hi"] = q_hi
+
+        return parsed
 
     def generate_slm_triage_turn(
         self,
@@ -530,9 +683,10 @@ class MedGemmaService:
         Outputs strict, validated JSON matching the 6-field contract with zero mock fallbacks.
         """
         has_cuda = _is_cuda_available()
+        has_neural_model = self.has_local_gguf() or self.is_ollama_available() or (self.has_adapter and has_cuda)
 
-        # Fast local CPU execution when no local GPU or Ollama daemon is active
-        if self.mode in ("mock", "local") and not (self.is_ollama_available() or (self.has_adapter and has_cuda)):
+        # Only use mock if mode is explicitly 'mock' or if mock fallback is enabled AND no neural model is ready
+        if self.mode == "mock" or (not has_neural_model and getattr(settings, "ENABLE_MOCK_FALLBACK", False)):
             m_turn = self._mock_slm_triage_turn(
                 conversation_history,
                 vitals or {},
@@ -553,7 +707,7 @@ class MedGemmaService:
             provider=provider
         )
 
-        executed_runtime = "mock_fallback"
+        executed_runtime = "local_neural_slm:medgemma-4b-it"
         try:
             raw_response, executed_runtime = self._call_backend_slm(
                 full_prompt=full_prompt,
@@ -563,6 +717,7 @@ class MedGemmaService:
             )
             cleaned = self._clean_json_text(raw_response)
             parsed = json.loads(cleaned)
+            parsed = self._normalize_triage_turn_payload(parsed, conversation_history, vitals)
             turn_obj = TriageTurnSchema(**parsed)
             clean_dict = turn_obj.model_dump()
             clean_dict["validation_status"] = "valid"
@@ -570,7 +725,7 @@ class MedGemmaService:
             clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
         except Exception as err:
             logger.warning(f"Live SLM execution failed ({err}).")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
                 logger.info("Falling back to deterministic clinical SLM engine.")
                 clean_dict = self._mock_slm_triage_turn(
                     conversation_history,

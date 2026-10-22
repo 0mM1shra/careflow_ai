@@ -28,3 +28,8 @@ evaluation_results/
 
 # Hugging Face Space local repo clone
 hf_space/
+
+# Large Model Weights (GGUF)
+*.gguf
+models/*.gguf
+scripts/test_*.py
