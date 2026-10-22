@@ -550,6 +550,7 @@ class MedGemmaService:
             provider=provider
         )
 
+        executed_runtime = "mock_fallback"
         try:
             raw_response, executed_runtime = self._call_backend_slm(
                 full_prompt=full_prompt,
@@ -571,7 +572,8 @@ class MedGemmaService:
                 clean_dict = self._mock_slm_triage_turn(
                     conversation_history,
                     vitals or {},
-                    previous_questions=previous_questions
+                    previous_questions=previous_questions,
+                    extracted_report=extracted_report
                 )
                 clean_dict["validation_status"] = "mock_fallback"
                 clean_dict["executed_runtime"] = "mock_fallback"
@@ -638,7 +640,8 @@ class MedGemmaService:
                 clean_dict = self._mock_slm_triage_turn(
                     conversation_history,
                     vitals or {},
-                    previous_questions=previous_questions
+                    previous_questions=previous_questions,
+                    extracted_report=extracted_report
                 )
                 clean_dict["validation_status"] = "repaired"
             else:
@@ -648,7 +651,7 @@ class MedGemmaService:
             clean_dict["validation_status"] = "valid"
 
         clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
-        clean_dict["executed_runtime"] = executed_runtime
+        clean_dict["executed_runtime"] = clean_dict.get("executed_runtime") or executed_runtime
         return clean_dict
 
     def _sanitize_clinical_bilingual_questions(
@@ -822,14 +825,16 @@ class MedGemmaService:
         self,
         conversation_history: List[str],
         vitals: Optional[Dict[str, Any]] = None,
-        previous_questions: Optional[List[str]] = None
+        previous_questions: Optional[List[str]] = None,
+        extracted_report: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         High-fidelity clinical emulator matching the trained careflow-medgemma-final
         LoRA adapter on the 6,000 diverse bilingual clinical intake dataset.
         """
         vitals_dict = vitals or {}
-        full_text = " ".join(conversation_history).lower()
+        doc_raw = (extracted_report or "").strip()
+        full_text = (" ".join(conversation_history) + " " + doc_raw).lower()
 
         # 1. System Flag Classification (8 distinct physiological organ systems)
         sys_scores = {
@@ -1088,12 +1093,47 @@ class MedGemmaService:
                         return True
             return False
 
-        q_list = questions_by_system.get(primary_sys, questions_by_system["sys_systemic"])
+        # Document Findings Priority: If patient uploaded an image/document, ask directly about report findings
         q_spec = None
-        for q in q_list:
-            if not _is_similar(q["en"], q.get("hi", "")):
-                q_spec = q
-                break
+        if doc_raw and not any(any(k in p for k in ["report", "document", "test", "दस्तावेज", "जांच", "lab", "image", "findings"]) for p in prev_texts):
+            doc_lower = doc_raw.lower()
+            if any(w in doc_lower for w in ["wbc", "crp", "infection", "tlc", "fever", "platelet", "dengue", "typhoid", "malaria", "leukocyte", "neutrophil"]):
+                q_spec = {
+                    "en": "I have reviewed your attached lab report showing infection markers. Have you started any prescribed antibiotics or fever medications, and are you having severe chills?",
+                    "hi": "मैंने आपकी संलग्न लैब रिपोर्ट की समीक्षा की है जिसमें संक्रमण के संकेत हैं। क्या आपने डॉक्टर द्वारा दी गई दवाएं शुरू कर दी हैं, और क्या तेज कंपकंपी या बुखार है?"
+                }
+            elif any(w in doc_lower for w in ["ecg", "troponin", "cardiac", "st elevation", "ischemia", "st depression", "arrhythmia", "infarct", "heart"]):
+                q_spec = {
+                    "en": "I have reviewed your uploaded ECG/cardiac report. Are you currently feeling any acute chest pressure, sweating, shortness of breath, or pain radiating to your left arm or jaw?",
+                    "hi": "मैंने आपकी ईसीजी/हृदय जांच रिपोर्ट देखी है। क्या आपको इस समय सीने में तेज दबाव, ठंडा पसीना, या बाएं हाथ/जबड़े में दर्द महसूस हो रहा है?"
+                }
+            elif any(w in doc_lower for w in ["fracture", "x-ray", "mri", "ct", "tear", "bone", "joint", "dislocation", "sprain"]):
+                q_spec = {
+                    "en": "I reviewed the imaging/radiology report you attached. Are you able to bear any weight or move the affected limb, and is there any significant swelling or joint deformity?",
+                    "hi": "मैंने आपकी संलग्न एक्स-रे/इमेजिंग रिपोर्ट की समीक्षा की है। क्या आप उस अंग पर थोड़ा भी वजन डाल पा रहे हैं, और क्या सूजन या दर्द बढ़ रहा है?"
+                }
+            elif any(w in doc_lower for w in ["creatinine", "urea", "urine", "protein", "pus cells", "kidney", "renal"]):
+                q_spec = {
+                    "en": "I have reviewed your renal/urinary lab findings in the uploaded document. Are you experiencing severe flank pain, burning urination, or fever?",
+                    "hi": "मैंने अपलोड किए गए दस्तावेज में किडनी/मूत्र परीक्षण के परिणाम देखे हैं। क्या आपको कमर के एक तरफ तेज दर्द, पेशाब में जलन या बुखार आ रहा है?"
+                }
+            elif any(w in doc_lower for w in ["hemoglobin", "hb", "anemia", "platelets"]):
+                q_spec = {
+                    "en": "I reviewed the hematology findings in your uploaded report. Have you felt extreme fatigue, lightheadedness, or shortness of breath when walking?",
+                    "hi": "मैंने आपकी रिपोर्ट में रक्त जांच (हीमोग्लोबिन/प्लेटलेट्स) के आंकड़े देखे हैं। क्या आपको अत्यधिक थकान, चक्कर आना या चलने पर सांस फूलने की समस्या हो रही है?"
+                }
+            else:
+                q_spec = {
+                    "en": "I have reviewed your attached medical document. What specific symptoms or discomfort prompted you to undergo this test, and how are you feeling right now?",
+                    "hi": "मैंने आपके द्वारा संलग्न किए गए मेडिकल दस्तावेज की समीक्षा की है। किन मुख्य लक्षणों या तकलीफ के कारण आपने यह जांच करवाई थी, और अभी आप कैसा महसूस कर रहे हैं?"
+                }
+
+        if not q_spec:
+            q_list = questions_by_system.get(primary_sys, questions_by_system["sys_systemic"])
+            for q in q_list:
+                if not _is_similar(q["en"], q.get("hi", "")):
+                    q_spec = q
+                    break
 
         if not q_spec:
             # Fallback across progressive clinical dimensions
