@@ -151,11 +151,11 @@ class MedGemmaService:
             "options": {
                 "temperature": 0.1,
                 "num_predict": 120,
-                "num_ctx": 4096,
+                "num_ctx": 8192,
                 "keep_alive": "30m",
             }
         }
-        timeout = settings.MODEL_TIMEOUT_SECONDS
+        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 120)
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             if resp.status_code == 200:
@@ -1007,7 +1007,7 @@ class MedGemmaService:
                 }
             }
 
-        timeout = settings.MODEL_TIMEOUT_SECONDS
+        timeout = max(settings.MODEL_TIMEOUT_SECONDS, 120)
         try:
             resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=timeout)
             # If 400 or 422, try alternate schema payload (HF vs OpenAI format)

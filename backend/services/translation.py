@@ -1,5 +1,6 @@
 import logging
 import re
+from functools import lru_cache
 from typing import Optional
 
 logger = logging.getLogger("careflow.translation")
@@ -39,6 +40,7 @@ class ClinicalTranslationService:
         except Exception as e:
             logger.debug(f"MyMemoryTranslator init: {e}")
 
+    @lru_cache(maxsize=512)
     def translate_to_english(self, text: str) -> str:
         """
         Translates Hindi or Romanized WhatsApp Hinglish into clean clinical English.
@@ -95,6 +97,7 @@ class ClinicalTranslationService:
         # 3. Fallback to raw text
         return raw
 
+    @lru_cache(maxsize=512)
     def translate_to_hindi(self, english_text: str, default_hindi: Optional[str] = None) -> str:
         """
         Translates an SLM-generated English follow-up question to natural Devanagari Hindi.

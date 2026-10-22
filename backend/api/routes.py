@@ -746,36 +746,51 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
     # Direct 6-Field SLM Turn Execution (zero 13-field bottleneck!)
     slm_turn = {}
-    try:
-        slm_turn = medgemma_service.generate_slm_triage_turn(
-            conversation_history=all_msgs,
-            vitals=vitals,
-            extracted_report=current_evidence.get("extracted_report"),
-            previous_questions=assistant_msgs,
-            preferred_language=case.preferred_language or "en",
-            provider=active_prov
-        )
+    if len(assistant_msgs) >= settings.MAX_FOLLOWUP_QUESTIONS:
+        logger.info(f"Case {case_id} reached maximum questions ({settings.MAX_FOLLOWUP_QUESTIONS}). Concluding question generation.")
+        slm_turn = current_evidence.get("slm_extraction") or {
+            "primary_system_flag": "sys_systemic",
+            "red_flag_severe_pain": False,
+            "red_flag_acute_onset": False,
+            "target_triage_boundary": case.priority_category or "P3",
+            "next_question_en": None,
+            "next_question_hi": None
+        }
         current_evidence["slm_extraction"] = slm_turn
         current_evidence["pending_slm_turn"] = slm_turn
-
-        # Map extracted indicators into evidence symptoms for downstream rule safety
-        symps = current_evidence.setdefault("symptoms", {})
-        if slm_turn.get("red_flag_severe_pain"):
-            symps["severe_pain"] = "reported"
-        if slm_turn.get("red_flag_acute_onset"):
-            symps["acute_onset"] = "reported"
-        if slm_turn.get("primary_system_flag"):
-            symps["primary_system"] = slm_turn["primary_system_flag"]
-
         case.evidence_state_json = json.dumps(current_evidence)
         case.ai_status = "ready"
-    except Exception as e:
-        logger.error(f"Error during direct SLM turn for case {case_id}: {e}")
-        if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
-            raise
-        case.ai_status = "failed"
-        case.priority_category = "ERR"
-        case.priority_reasons_json = json.dumps([f"SLM Turn Error: {type(e).__name__} - {str(e)}"])
+    else:
+        try:
+            slm_turn = medgemma_service.generate_slm_triage_turn(
+                conversation_history=all_msgs,
+                vitals=vitals,
+                extracted_report=current_evidence.get("extracted_report"),
+                previous_questions=assistant_msgs,
+                preferred_language=case.preferred_language or "en",
+                provider=active_prov
+            )
+            current_evidence["slm_extraction"] = slm_turn
+            current_evidence["pending_slm_turn"] = slm_turn
+
+            # Map extracted indicators into evidence symptoms for downstream rule safety
+            symps = current_evidence.setdefault("symptoms", {})
+            if slm_turn.get("red_flag_severe_pain"):
+                symps["severe_pain"] = "reported"
+            if slm_turn.get("red_flag_acute_onset"):
+                symps["acute_onset"] = "reported"
+            if slm_turn.get("primary_system_flag"):
+                symps["primary_system"] = slm_turn["primary_system_flag"]
+
+            case.evidence_state_json = json.dumps(current_evidence)
+            case.ai_status = "ready"
+        except Exception as e:
+            logger.error(f"Error during direct SLM turn for case {case_id}: {e}")
+            if os.getenv("ENABLE_MOCK_FALLBACK", "false").lower() != "true":
+                raise
+            case.ai_status = "failed"
+            case.priority_category = "ERR"
+            case.priority_reasons_json = json.dumps([f"SLM Turn Error: {type(e).__name__} - {str(e)}"])
 
     # Immediate LightGBM Feature Routing & Triage Inference
     lgbm_res = predict_urgency_lgbm_with_details(
@@ -1127,12 +1142,19 @@ def get_next_question(case_id: str, db: Session = Depends(get_db)):
 
 
     patient_msgs = [m.content for m in case.messages if m.role == "patient"]
-
     assistant_msgs = [m.content for m in case.messages if m.role == "assistant"]
-
     turn_count = len(assistant_msgs)
 
-
+    if turn_count >= settings.MAX_FOLLOWUP_QUESTIONS:
+        return FollowUpQuestionOutput(
+            next_question=None,
+            next_question_en=None,
+            next_question_hi=None,
+            reason_for_question=f"Reached maximum limit of {settings.MAX_FOLLOWUP_QUESTIONS} follow-up questions. Intake ready for human clinician review.",
+            target_field="limit_reached",
+            is_terminal=True,
+            selected_provider=getattr(case, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
+        )
 
     evidence_st = json.loads(case.evidence_state_json or "{}")
 
