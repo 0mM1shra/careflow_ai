@@ -761,15 +761,6 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         case.evidence_state_json = json.dumps(current_evidence)
         case.ai_status = "ready"
 
-        ev_audit = AuditEvent(
-            case_id=case.id,
-            event_type="evidence_state_updated",
-            new_value_json=json.dumps({"document_extracted": file.filename, "facts_count": len(ocr_res.structured_facts)}),
-            reason=f"Clinical evidence state updated from medical document '{file.filename}'",
-            actor_role="ai_system",
-            created_at=datetime.utcnow()
-        )
-        db.add(ev_audit)
     else:
         try:
             slm_turn = medgemma_service.generate_slm_triage_turn(

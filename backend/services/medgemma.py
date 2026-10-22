@@ -410,7 +410,12 @@ class MedGemmaService:
 
         prev_q_str = ""
         if previous_questions:
-            clean_prev = [f"- {q.strip()}" for q in previous_questions if q and q.strip()]
+            clean_prev = []
+            for q in previous_questions:
+                if not q or not q.strip():
+                    continue
+                q_en_norm = translation_service.translate_to_english(q.strip())
+                clean_prev.append(f"- {q_en_norm}")
             if clean_prev:
                 prev_q_str = (
                     "\n<already_asked_questions>\n"
@@ -627,22 +632,23 @@ class MedGemmaService:
                 if not prev or not prev.strip():
                     continue
                 p_norm = prev.lower().strip()
-                if q_norm == p_norm or q_norm in p_norm or p_norm in q_norm:
+                p_en = translation_service.translate_to_english(prev.strip()).lower()
+                if q_norm == p_norm or q_norm in p_norm or p_norm in q_norm or q_norm == p_en or q_norm in p_en or p_en in q_norm:
                     is_duplicate = True
                     break
-                qk = set(w for w in q_norm.split() if len(w) > 4)
-                pk = set(w for w in p_norm.split() if len(w) > 4)
-                if qk and pk and (len(qk.intersection(pk)) / max(len(qk), len(pk))) > 0.6:
+                qk = set(w for w in q_norm.replace("?", "").replace(",", "").split() if len(w) > 3)
+                pk = set(w for w in p_en.replace("?", "").replace(",", "").split() if len(w) > 3)
+                if qk and pk and (len(qk.intersection(pk)) / min(len(qk), len(pk))) >= 0.4:
                     is_duplicate = True
                     break
 
             if is_duplicate:
                 logger.info(f"Detected repeated question '{q_en}'. Re-targeting next uncollected clinical dimension...")
                 full_conv_text = " ".join(conversation_history).lower()
-                prev_text = " ".join([p for p in previous_questions if p]).lower()
+                all_prev_en = " ".join([translation_service.translate_to_english(p).lower() for p in previous_questions if p])
 
-                # Dimension 4: Lab report findings (prioritized abnormal findings)
-                if extracted_report and ("lab" not in prev_text and "report" not in prev_text and "test" not in prev_text):
+                # Priority 0: Abnormal Document Findings
+                if extracted_report and not any(k in all_prev_en for k in ["report", "lab", "finding", "test", "result"]):
                     v_dict = vitals or {}
                     spo2_v = v_dict.get("spo2_pct")
                     bp_v = v_dict.get("systolic_bp")
@@ -658,18 +664,24 @@ class MedGemmaService:
                         q_en = f"Your report indicates a high fever of {temp_v}°F. Are you experiencing severe rigors, neck stiffness, or confusion?"
                     else:
                         q_en = "Have you started any treatment or medication for the findings in your uploaded report, and are your symptoms getting worse today?"
-                # Dimension 3: Cardiac / Radiating pain
-                elif ("chest" in full_conv_text or "seene" in full_conv_text) and ("radiat" not in prev_text and "arm" not in prev_text):
-                    q_en = "Does the chest pain radiate or spread to your left arm, jaw, neck, or back, and is it accompanied by dizziness?"
-                # Dimension 2: Severity & Progression
-                elif "scale" not in prev_text and "1 to 10" not in prev_text and "worse" not in prev_text:
-                    q_en = "On a scale of 1 to 10, how severe is your discomfort right now, and has it gotten progressively worse today?"
-                # Dimension 1: Onset & Duration
-                elif "sudden" not in prev_text and "gradual" not in prev_text and "hours" not in prev_text:
-                    q_en = "Did this symptom start suddenly or develop gradually, and have you ever had an episode like this before?"
-                # Medical history & medications
+                # Priority 1: Pain severity (1 to 10 scale)
+                elif not any(k in all_prev_en for k in ["scale", "1 to 10", "1-10", "rate", "how severe"]):
+                    q_en = "On a scale of 1 to 10, how severe is your pain or discomfort right now, and has it gotten progressively worse today?"
+                # Priority 2: Radiating or spreading pain
+                elif ("chest" in full_conv_text or "pain" in full_conv_text or "dard" in full_conv_text) and not any(k in all_prev_en for k in ["radiat", "spread", "arm", "jaw", "neck", "back"]):
+                    q_en = "Does the pain or discomfort radiate or spread to any other part of your body, such as your arm, jaw, neck, or back?"
+                # Priority 3: Timeline & onset
+                elif not any(k in all_prev_en for k in ["sudden", "gradual", "hours", "days", "when did", "start"]):
+                    q_en = "Did this symptom start suddenly or develop gradually, and approximately how many hours or days ago did it begin?"
+                # Priority 4: Associated systemic symptoms
+                elif not any(k in all_prev_en for k in ["fever", "chills", "dizziness", "sweat", "nausea"]):
+                    q_en = "Are you experiencing any associated fever, chills, dizziness, cold sweats, or nausea?"
+                # Priority 5: Medications and chronic conditions
+                elif not any(k in all_prev_en for k in ["medication", "medicine", "taking", "chronic", "history"]):
+                    q_en = "Do you have any chronic medical conditions (such as high blood pressure or diabetes), or are you currently taking any prescription medications?"
+                # Priority 6: Functional impairment
                 else:
-                    q_en = "Do you have any existing chronic medical conditions, or are you currently taking any prescription medications?"
+                    q_en = "Are these symptoms preventing you from performing normal activities, walking, or resting comfortably?"
 
                 clean_dict["next_question_en"] = q_en
 

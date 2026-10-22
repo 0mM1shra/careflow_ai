@@ -57,5 +57,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=settings.BACKEND_HOST,
         port=settings.BACKEND_PORT,
-        reload=True
+        reload=True,
+        reload_dirs=["backend"],
+        reload_excludes=[".venv", ".git", "__pycache__", "*.pyc", "*.log"]
     )
