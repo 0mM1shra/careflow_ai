@@ -251,21 +251,78 @@ class MedicalDocumentOCRService:
             logger.warning(f"PaddleOCR execution failed: {e}")
             return None, 0.0
 
-    @staticmethod
-    def extract_from_pdf(file_bytes: bytes) -> Tuple[str, str, float]:
-        """Extracts text content from a PDF document using pypdf."""
+    def _get_rapid_ocr(self):
+        """Lazy loader for RapidOCR (PP-OCRv4 ONNX)."""
+        if getattr(self, "_rapid_ocr", None) is not None:
+            return self._rapid_ocr
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            logger.info("Initializing RapidOCR (PP-OCRv4 ONNX) engine...")
+            self._rapid_ocr = RapidOCR()
+            return self._rapid_ocr
+        except Exception as e:
+            logger.warning(f"RapidOCR engine initialization failed: {e}")
+            return None
+
+    def _extract_with_rapidocr(self, image: Image.Image) -> Tuple[Optional[str], float]:
+        """Runs RapidOCR on PIL image, returning structured lines and confidence."""
+        engine = self._get_rapid_ocr()
+        if engine is None:
+            return None, 0.0
+
+        try:
+            import numpy as np
+            img_arr = np.array(image)
+            result, _ = engine(img_arr)
+            if not result:
+                return None, 0.0
+
+            lines = []
+            scores = []
+            for item in result:
+                if len(item) >= 3:
+                    text_str = str(item[1]).strip()
+                    conf = float(item[2])
+                    if text_str:
+                        lines.append(text_str)
+                        scores.append(conf)
+
+            if not lines:
+                return None, 0.0
+
+            avg_conf = round(sum(scores) / len(scores), 3) if scores else 0.92
+            return "\n".join(lines), avg_conf
+        except Exception as e:
+            logger.warning(f"RapidOCR execution failed: {e}")
+            return None, 0.0
+
+    def extract_from_pdf(self, file_bytes: bytes) -> Tuple[str, str, float]:
+        """Extracts text content from a PDF document using pypdf, with image OCR fallback for scanned PDFs."""
         try:
             import pypdf
             reader = pypdf.PdfReader(io.BytesIO(file_bytes))
             pages_text = []
+            scanned_pages_text = []
+
             for idx, page in enumerate(reader.pages):
                 txt = page.extract_text()
                 if txt and txt.strip():
                     pages_text.append(f"--- Page {idx+1} ---\n{txt.strip()}")
+                else:
+                    # Attempt OCR on embedded scanned page images
+                    try:
+                        for img_idx, img_file in enumerate(page.images):
+                            img_txt, _, _ = self.extract_from_image(img_file.data)
+                            if img_txt and not img_txt.startswith("["):
+                                scanned_pages_text.append(f"--- Page {idx+1} (Scanned Image {img_idx+1}) ---\n{img_txt.strip()}")
+                    except Exception as scan_err:
+                        logger.warning(f"Failed to extract images from PDF page {idx+1}: {scan_err}")
 
-            if not pages_text:
-                return "[Note: PDF contains scanned pages without embedded text layer.]", "pypdf", 0.5
-            return "\n\n".join(pages_text), "pypdf", 0.95
+            if pages_text:
+                return "\n\n".join(pages_text), "pypdf", 0.95
+            elif scanned_pages_text:
+                return "\n\n".join(scanned_pages_text), "rapidocr_pdf_scan", 0.90
+            return "[Note: PDF contains scanned pages without readable text layer.]", "pypdf", 0.5
         except Exception as e:
             logger.error(f"Error parsing PDF document: {e}")
             return f"[Error parsing PDF: {str(e)}]", "pypdf_error", 0.0
@@ -273,24 +330,23 @@ class MedicalDocumentOCRService:
     def extract_from_image(self, file_bytes: bytes) -> Tuple[str, str, float]:
         """
         Extracts text from an image with multi-tier engine support:
-        1. winocr (Windows Native)
-        2. PaddleOCR (Multilingual fallback)
-        3. pytesseract (Legacy fallback)
+        1. RapidOCR (PP-OCRv4 ONNX - High Accuracy Table & Lab Parser)
+        2. winocr (Windows Native Fallback)
+        3. PaddleOCR (Multilingual Fallback)
+        4. pytesseract (Legacy Fallback)
         """
         try:
             image = Image.open(io.BytesIO(file_bytes))
             if image.mode not in ("RGB", "L"):
                 image = image.convert("RGB")
 
-            engine_choice = settings.OCR_ENGINE.lower()
+            # Tier 1: RapidOCR (PP-OCRv4 ONNX)
+            rapid_text, rapid_conf = self._extract_with_rapidocr(image)
+            if rapid_text and len(rapid_text.strip()) >= 5:
+                logger.info(f"Successfully extracted {len(rapid_text)} chars using RapidOCR (conf={rapid_conf})")
+                return rapid_text.strip(), "rapidocr", rapid_conf
 
-            # Path 1: If PaddleOCR is explicitly requested, try it first
-            if engine_choice == "paddleocr":
-                paddle_text, paddle_conf = self._extract_with_paddle(image)
-                if paddle_text:
-                    return paddle_text, "paddleocr", paddle_conf
-
-            # Path 2: Try native Windows OCR (winocr)
+            # Tier 2: Native Windows OCR (winocr)
             try:
                 import winocr
                 import concurrent.futures
@@ -305,13 +361,12 @@ class MedicalDocumentOCRService:
             except Exception as ocr_err:
                 logger.warning(f"Native winocr recognition error: {ocr_err}")
 
-            # Path 3: Fallback to PaddleOCR if winocr failed or was not selected
-            if engine_choice != "winocr":
-                paddle_text, paddle_conf = self._extract_with_paddle(image)
-                if paddle_text:
-                    return paddle_text, "paddleocr", paddle_conf
+            # Tier 3: PaddleOCR fallback
+            paddle_text, paddle_conf = self._extract_with_paddle(image)
+            if paddle_text:
+                return paddle_text, "paddleocr", paddle_conf
 
-            # Path 4: Fallback to pytesseract if available
+            # Tier 4: pytesseract fallback
             try:
                 import pytesseract
                 text = pytesseract.image_to_string(image).strip()
