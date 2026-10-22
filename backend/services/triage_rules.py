@@ -267,7 +267,7 @@ class DeterministicTriageEngine:
         ml_prediction = "P3"
         ml_conf = 0.0
         try:
-            res = predict_urgency_lgbm(evidence_state, lab_vitals)
+            res = predict_urgency_lgbm(evidence_state, vitals)
             ml_prediction = str(res)
             ml_conf = float(res.get("ml_confidence", 0.0)) if isinstance(res, dict) else 0.0
         except Exception as e:
