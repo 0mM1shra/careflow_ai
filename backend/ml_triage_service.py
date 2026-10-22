@@ -650,3 +650,16 @@ def explain_triage_decision(
         "is_divergent": is_divergent,
         "probabilities": probabilities or {},
     }
+
+# Upstream compatibility exports
+COLUMNS = FEATURE_COLUMNS
+CLASS_TO_TIER = TARGET_PRIORITY_MAP
+MLTriageResult = dict
+
+def construct_tabular_features(evidence_state: Dict[str, Any], lab_vitals: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """Compatibility bridge for tabular feature construction."""
+    return _map_slm_and_vitals_to_dataframe(evidence_state, lab_vitals)
+
+def get_model():
+    """Compatibility bridge for get_lgbm_model."""
+    return get_lgbm_model()

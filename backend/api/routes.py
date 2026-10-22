@@ -61,7 +61,7 @@ from backend.services.summarization import clinical_summarization_service
 from backend.services.triage_rules import triage_engine
 
 from backend.services.evidence_state import EvidenceStateManager
-
+from backend.ml_triage_service import predict_urgency_lgbm
 from backend.config import settings
 
 
@@ -151,7 +151,7 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     case_id = _generate_case_id()
 
     init_priority = "P3"
-
+    init_ml_model = "P3"
     init_reasons = []
 
     init_missing = []
@@ -159,33 +159,29 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
     init_uncertainties = []
 
     if req.chief_complaint and req.chief_complaint.strip():
-
         initial_triage = triage_engine.evaluate(
-
             evidence_state={"facts": {"chief_complaint": req.chief_complaint.strip()}},
-
             raw_messages=[req.chief_complaint.strip()],
-
             ai_status="ready"
-
         )
-
         init_priority = initial_triage.priority_category
-
+        init_ml_model = initial_triage.ml_model_triage or "P3"
         init_reasons = initial_triage.reasons
-
         init_missing = initial_triage.missing_information
-
         init_uncertainties = initial_triage.uncertainties
-
+        init_decision_path = getattr(initial_triage, "decision_path", None) or "model_urgency_reasoning"
         init_ml_priority = initial_triage.ml_model_triage or "P3"
-
-
-
         init_final = getattr(initial_triage, "final_triage", None) or init_priority
         init_rule = getattr(initial_triage, "rule_based_triage", None) or init_priority
         init_escalated = getattr(initial_triage, "escalation_applied", False)
         init_esc_reason = getattr(initial_triage, "escalation_reason", None)
+    else:
+        init_decision_path = "model_urgency_reasoning"
+        init_ml_priority = "P3"
+        init_final = init_priority
+        init_rule = init_priority
+        init_escalated = False
+        init_esc_reason = None
 
     prov = getattr(req, "selected_model_provider", None) or settings.DEFAULT_MEDGEMMA_PROVIDER
 
@@ -197,17 +193,16 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
         priority_category=init_priority,
         final_triage=init_final if "init_final" in locals() else init_priority,
         rule_based_triage=init_rule if "init_rule" in locals() else init_priority,
-        ml_model_triage=init_ml_priority if "init_ml_priority" in locals() else "P3",
+        ml_model_triage=init_ml_priority if "init_ml_priority" in locals() else (init_ml_model if "init_ml_model" in locals() else "P3"),
         escalation_applied=init_escalated if "init_escalated" in locals() else False,
         escalation_reason=init_esc_reason if "init_esc_reason" in locals() else None,
         selected_model_provider=prov,
-
         priority_reasons_json=json.dumps(init_reasons) if init_reasons else None,
 
         missing_information_json=json.dumps(init_missing) if init_missing else None,
 
         uncertainties_json=json.dumps(init_uncertainties) if init_uncertainties else None,
-
+        decision_path=init_decision_path if "init_decision_path" in locals() else "model_urgency_reasoning",
         review_status="pending",
 
         triage_rule_version=settings.TRIAGE_RULE_VERSION,
@@ -347,17 +342,13 @@ def list_cases(
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
 
             "priority_category": c.priority_category,
-
             "final_triage": getattr(c, "final_triage", None) or c.priority_category,
-
+            "rule_based_priority": getattr(c, "rule_based_triage", None) or c.priority_category,
             "rule_based_triage": getattr(c, "rule_based_triage", None) or c.priority_category,
-
+            "ml_model_priority": getattr(c, "ml_model_triage", None) or "P3",
             "ml_model_triage": getattr(c, "ml_model_triage", None) or "P3",
-
             "escalation_applied": getattr(c, "escalation_applied", False),
-
             "escalation_reason": getattr(c, "escalation_reason", None),
-
             "review_status": c.review_status,
 
             "chief_complaint": c.chief_complaint or "Not entered",
@@ -440,6 +431,54 @@ def get_case(case_id: str, db: Session = Depends(get_db)):
     return case_dict
 
 
+@router.delete("/cases/{case_id}")
+def delete_case(case_id: str, db: Session = Depends(get_db)):
+    """
+    Permanently deletes a patient case and all associated messages,
+    evidence records, and audit events from the system.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    case_id_val = case.id
+    db.delete(case)
+    db.commit()
+    logger.info(f"Permanently deleted case {case_id_val} and associated cascade records.")
+    return {"status": "deleted", "case_id": case_id_val}
+
+
+@router.post("/cases/{case_id}/mark-done")
+def mark_case_done(case_id: str, notes: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Marks a patient case as done/completed in the queue.
+    Records an immutable audit event and updates review_status to 'done'.
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+
+    old_status = case.review_status
+    case.review_status = "done"
+    case.reviewed_at = datetime.utcnow()
+    if notes:
+        case.reviewer_notes = notes
+    case.updated_at = datetime.utcnow()
+
+    audit = AuditEvent(
+        case_id=case.id,
+        event_type="case_marked_done",
+        old_value_json=json.dumps({"review_status": old_status}),
+        new_value_json=json.dumps({"review_status": "done"}),
+        reason=notes or "Clinician marked patient case as completed/done in queue",
+        actor_role="reviewer",
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(case)
+
+    return {"status": "success", "case_id": case.id, "review_status": "done"}
 
 
 
@@ -769,6 +808,8 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     else:
         case.priority_category = new_p
 
+    case.ml_model_triage = triage_res.ml_model_priority or triage_res.ml_model_triage
+    case.ml_confidence = triage_res.ml_confidence or 0.0
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
@@ -776,6 +817,8 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     case.final_triage = getattr(triage_res, "final_triage", None) or case.priority_category
     case.escalation_applied = getattr(triage_res, "escalation_applied", False)
     case.escalation_reason = getattr(triage_res, "escalation_reason", None)
+    if getattr(triage_res, "decision_path", None):
+        case.decision_path = triage_res.decision_path
     case.updated_at = datetime.utcnow()
     db.commit()
 
@@ -788,11 +831,11 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
         "message": msg.to_dict(),
 
         "interim_priority": triage_res.priority_category,
-
-        "rule_based_triage": triage_res.priority_category,
-
-        "ml_model_triage": triage_res.ml_model_triage or "P3",
-
+        "rule_based_priority": getattr(triage_res, "rule_based_triage", None) or triage_res.priority_category,
+        "rule_based_triage": getattr(triage_res, "rule_based_triage", None) or triage_res.priority_category,
+        "ml_model_priority": getattr(triage_res, "ml_model_triage", None) or "P3",
+        "ml_model_triage": getattr(triage_res, "ml_model_triage", None) or "P3",
+        "ml_confidence": getattr(triage_res, "ml_confidence", 0.0) or 0.0,
         "warning_signs": triage_res.warning_signs,
 
         "is_emergency": triage_res.priority_category == "P0"
@@ -1021,6 +1064,8 @@ async def upload_medical_document(
     else:
         case.priority_category = new_p
 
+    case.ml_model_triage = triage_res.ml_model_priority or triage_res.ml_model_triage
+    case.ml_confidence = triage_res.ml_confidence or 0.0
     case.priority_reasons_json = json.dumps(triage_res.reasons)
     case.missing_information_json = json.dumps(triage_res.missing_information)
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
@@ -1048,11 +1093,11 @@ async def upload_medical_document(
         "confidence": ocr_res.confidence,
 
         "interim_priority": triage_res.priority_category,
-
-        "rule_based_triage": triage_res.priority_category,
-
-        "ml_model_triage": triage_res.ml_model_triage or "P3",
-
+        "rule_based_priority": getattr(triage_res, "rule_based_triage", None) or triage_res.priority_category,
+        "rule_based_triage": getattr(triage_res, "rule_based_triage", None) or triage_res.priority_category,
+        "ml_model_priority": getattr(triage_res, "ml_model_triage", None) or "P3",
+        "ml_model_triage": getattr(triage_res, "ml_model_triage", None) or "P3",
+        "ml_confidence": getattr(triage_res, "ml_confidence", 0.0) or 0.0,
         "warning_signs": triage_res.warning_signs,
 
         "is_emergency": triage_res.priority_category == "P0"
@@ -1276,15 +1321,15 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
 
 
     case.priority_category = final_priority
-
-    case.ml_model_triage = triage_res.ml_model_triage or "P3"
-
+    case.ml_model_triage = getattr(triage_res, "ml_model_triage", None) or "P3"
+    case.ml_confidence = getattr(triage_res, "ml_confidence", 0.0) or 0.0
     case.priority_reasons_json = json.dumps(final_reasons)
 
     case.missing_information_json = json.dumps(triage_res.missing_information)
 
     case.uncertainties_json = json.dumps(triage_res.uncertainties)
-
+    if getattr(triage_res, "decision_path", None):
+        case.decision_path = triage_res.decision_path
     case.review_status = "pending"
 
     case.updated_at = datetime.utcnow()
@@ -1302,7 +1347,11 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
         new_value_json=json.dumps({
 
             "priority": triage_res.priority_category,
-
+            "rule_based_priority": getattr(triage_res, "rule_based_triage", None) or final_priority,
+            "rule_based_triage": getattr(triage_res, "rule_based_triage", None) or final_priority,
+            "ml_model_priority": getattr(triage_res, "ml_model_triage", None) or "P3",
+            "ml_model_triage": getattr(triage_res, "ml_model_triage", None) or "P3",
+            "ml_confidence": getattr(triage_res, "ml_confidence", 0.0) or 0.0,
             "reasons": triage_res.reasons,
 
             "ai_status": case.ai_status
@@ -1323,20 +1372,25 @@ def submit_case(case_id: str, db: Session = Depends(get_db)):
 
     db.refresh(case)
 
-
+    suggested_fu = (
+        evidence_st.get("next_question_hi")
+        or evidence_st.get("next_question_en")
+        or None
+    )
 
     return {
 
         "status": "submitted",
 
         "case_id": case.id,
-
         "priority_category": case.priority_category,
-
-        "rule_based_triage": case.priority_category,
-
-        "ml_model_triage": getattr(case, "ml_model_triage", None) or triage_res.ml_model_triage or "P3",
-
+        "rule_based_priority": getattr(case, "rule_based_triage", None) or final_priority,
+        "rule_based_triage": getattr(case, "rule_based_triage", None) or final_priority,
+        "ml_model_priority": getattr(case, "ml_model_triage", None) or getattr(triage_res, "ml_model_triage", "P3"),
+        "ml_model_triage": getattr(case, "ml_model_triage", None) or getattr(triage_res, "ml_model_triage", "P3"),
+        "ml_confidence": getattr(case, "ml_confidence", 0.0) or 0.0,
+        "extracted_features": evidence_st,
+        "suggested_follow_up": suggested_fu if "suggested_fu" in locals() else None,
         "ai_status": case.ai_status,
 
         "case": case.to_dict()

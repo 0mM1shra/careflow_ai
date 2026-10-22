@@ -129,6 +129,54 @@ def render_priority_badge(priority: str) -> str:
     else:
         return '<span class="badge-err">⚠️ Review Required — AI Unavailable</span>'
 
+def render_rule_based_badge(priority: str) -> str:
+    p = (priority or "P3").upper()
+    colors = {
+        "P0": ("#FEE2E2", "#991B1B", "#F87171"),
+        "P1": ("#FEF3C7", "#92400E", "#FBBF24"),
+        "P2": ("#E0E7FF", "#3730A3", "#818CF8"),
+        "P3": ("#DCFCE7", "#166534", "#4ADE80"),
+    }
+    bg, fg, border = colors.get(p, ("#F1F5F9", "#475569", "#94A3B8"))
+    return f'<span style="background-color: {bg}; color: {fg}; border: 1px solid {border}; padding: 3px 8px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">📋 Rule-Based: {p}</span>'
+
+def render_lgbm_badge(priority: str) -> str:
+    p = (priority or "P3").upper()
+    colors = {
+        "P0": ("#FEF2F2", "#991B1B", "#F87171"),
+        "P1": ("#FFFBEB", "#92400E", "#FBBF24"),
+        "P2": ("#EEF2FF", "#3730A3", "#818CF8"),
+        "P3": ("#F0FDF4", "#166534", "#4ADE80"),
+    }
+    bg, fg, border = colors.get(p, ("#F1F5F9", "#475569", "#94A3B8"))
+    return f'<span style="background-color: {bg}; color: {fg}; border: 1.5px solid {border}; padding: 3px 8px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">🌳 LightGBM: {p}</span>'
+
+
+def render_decision_path_badge(path: str) -> str:
+    path_low = (path or "").lower()
+    if "model" in path_low:
+        return '<span style="background-color: #EDE9FE; color: #5B21B6; border: 1px solid #A78BFA; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">🤖 MedGemma Urgency Reasoning</span>'
+    elif "acuity" in path_low:
+        return '<span style="background-color: #E0F2FE; color: #075985; border: 1px solid #7DD3FC; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">📊 Multi-Dimensional Acuity</span>'
+    elif "guardrail" in path_low:
+        return '<span style="background-color: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">🛡️ Safety Guardrail Floor</span>'
+    else:
+        return '<span style="background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; display: inline-block;">⚠️ AI Failsafe Fallback</span>'
+
+def render_status_badge(status: str) -> str:
+    s = (status or "").lower()
+    if s == "done":
+        return '<span style="background-color: #ECFDF5; color: #065F46; border: 1px solid #6EE7B7; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px;">✅ DONE</span>'
+    elif s == "approved":
+        return '<span style="background-color: #F0FDF4; color: #15803D; border: 1px solid #86EFAC; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px;">✅ APPROVED</span>'
+    elif s == "reviewed":
+        return '<span style="background-color: #EFF6FF; color: #1D4ED8; border: 1px solid #93C5FD; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px;">📝 REVIEWED</span>'
+    elif s == "reopened":
+        return '<span style="background-color: #FFF7ED; color: #C2410C; border: 1px solid #FDBA74; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px;">🔄 REOPENED</span>'
+    else:
+        return '<span style="background-color: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px;">⏳ PENDING</span>'
+
+
 # Header
 st.markdown("""
 <div class="reviewer-header">
@@ -166,24 +214,26 @@ p0_count = sum(1 for c in all_cases if c["priority_category"] == "P0")
 p1_count = sum(1 for c in all_cases if c["priority_category"] == "P1")
 p2_count = sum(1 for c in all_cases if c["priority_category"] == "P2")
 p3_count = sum(1 for c in all_cases if c["priority_category"] == "P3")
+done_count = sum(1 for c in all_cases if c["review_status"] in ("done", "approved"))
 pending_count = sum(1 for c in all_cases if c["review_status"] == "pending")
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Total In Queue", total_count)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+m1.metric("Total Patients", total_count)
 m2.metric("🚨 P0 Emergency", p0_count)
 m3.metric("⚠️ P1 Urgent", p1_count)
 m4.metric("❓ P2 Uncertain", p2_count)
 m5.metric("📋 P3 Routine", p3_count)
-m6.metric("⏳ Awaiting Review", pending_count)
+m6.metric("✅ Done", done_count)
+m7.metric("⏳ Pending", pending_count)
 
 st.write("---")
 
 # Filter Controls
-f_col1, f_col2, f_col3, f_col4 = st.columns([1, 1, 1, 1])
+f_col1, f_col2, f_col3, f_col4 = st.columns([1.2, 1.4, 1.2, 1])
 with f_col1:
     filter_priority = st.selectbox("Filter Priority", ["All", "P0", "P1", "P2", "P3", "ERR"], index=0)
 with f_col2:
-    filter_status = st.selectbox("Filter Status", ["All", "pending", "reviewed", "approved", "reopened"], index=0)
+    filter_status = st.selectbox("Queue View / Status", ["Active Queue (Pending / Reviewed)", "All Patients", "done", "pending", "reviewed", "approved", "reopened"], index=0)
 with f_col3:
     filter_uncertainty = st.selectbox("Filter Uncertainty / Conflict", ["All", "Has Uncertainty or Conflict", "No Conflicts"], index=0)
 with f_col4:
@@ -195,8 +245,11 @@ with f_col4:
 filtered_cases = list(all_cases)
 if filter_priority != "All":
     filtered_cases = [c for c in filtered_cases if c["priority_category"] == filter_priority]
-if filter_status != "All":
+if filter_status == "Active Queue (Pending / Reviewed)":
+    filtered_cases = [c for c in filtered_cases if c["review_status"] not in ("done", "approved")]
+elif filter_status != "All Patients":
     filtered_cases = [c for c in filtered_cases if c["review_status"] == filter_status]
+
 if filter_uncertainty == "Has Uncertainty or Conflict":
     filtered_cases = [c for c in filtered_cases if c["has_uncertainty_or_conflict"]]
 elif filter_uncertainty == "No Conflicts":
@@ -222,37 +275,76 @@ with col_queue:
             p_badge = render_priority_badge(final_prio)
             chief = c["chief_complaint"] or "Chief complaint not provided"
             wait_min = c.get("waiting_minutes", 0.0)
-            status = c["review_status"].upper()
+            status_str = c["review_status"]
+            s_badge = render_status_badge(status_str)
             
             esc_flag = "🚨 Escalated" if c.get("escalation_applied") else ""
             missing_flag = "⚠️ Missing Info" if c["has_missing_info"] else ""
             conflict_flag = "⚡ Conflict" if c["has_uncertainty_or_conflict"] else ""
             flags = " • ".join([f for f in [esc_flag, missing_flag, conflict_flag] if f])
 
+            rule_t = c.get("rule_based_triage") or priority
+            ml_t = c.get("ml_model_triage") or priority
             is_selected = (st.session_state.selected_case_id == case_id)
             box_style = "border: 2px solid #0284C7; background: #F0F9FF;" if is_selected else "background: #FFFFFF;"
 
             st.markdown(f"""
-            <div style="border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; margin-bottom: 10px; {box_style}">
+            <div style="border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; margin-bottom: 8px; {box_style}">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                     <strong>{case_id}</strong>
-                    <div style="display: flex; gap: 6px; align-items: center;">
+                    <div style="display: flex; gap: 4px; align-items: center;">
                         <span>{p_badge}</span>
-                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #EEF2F6; color: #334155; font-weight: 600;">ML: {ml_prio}</span>
-                        <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #F8FAFC; color: #64748B; font-weight: 600;">Rule: {rule_prio}</span>
+                        {render_lgbm_badge(ml_prio)}
+                        {render_rule_based_badge(rule_prio)}
                     </div>
                 </div>
                 <div style="font-size: 14px; color: #1E293B; margin-bottom: 4px;">{chief[:80]}</div>
-                <div style="font-size: 12px; color: #64748B; display: flex; justify-content: space-between;">
-                    <span>Wait: <strong>{wait_min}m</strong> | Status: <strong>{status}</strong></span>
+                <div style="font-size: 12px; color: #64748B; display: flex; justify-content: space-between; align-items: center;">
+                    <span>Wait: <strong>{wait_min}m</strong> | {s_badge}</span>
                     <span style="color: #B45309; font-weight: 600;">{flags}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            if st.button(f"Inspect Case {case_id}", key=f"sel_{case_id}", use_container_width=True):
-                st.session_state.selected_case_id = case_id
-                st.rerun()
+            # Quick action buttons row under card
+            qc_col1, qc_col2, qc_col3 = st.columns([1.5, 1.2, 0.8])
+            with qc_col1:
+                if st.button(f"Inspect 🔍", key=f"sel_{case_id}", use_container_width=True):
+                    st.session_state.selected_case_id = case_id
+                    st.rerun()
+            with qc_col2:
+                if status_str != "done":
+                    if st.button(f"Done ✅", key=f"quick_done_{case_id}", use_container_width=True, help="Mark this patient case as done"):
+                        try:
+                            api_client.mark_case_done(case_id)
+                            st.success(f"{case_id} marked Done!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                else:
+                    st.caption("✅ Completed")
+            with qc_col3:
+                if st.button("🗑️", key=f"quick_del_btn_{case_id}", help="Delete patient case from queue"):
+                    st.session_state[f"show_del_confirm_{case_id}"] = not st.session_state.get(f"show_del_confirm_{case_id}", False)
+
+            if st.session_state.get(f"show_del_confirm_{case_id}", False):
+                st.warning(f"Delete {case_id} permanently?")
+                del_c1, del_c2 = st.columns(2)
+                with del_c1:
+                    if st.button("Yes, Delete", key=f"confirm_del_yes_{case_id}", type="primary", use_container_width=True):
+                        try:
+                            api_client.delete_case(case_id)
+                            if st.session_state.selected_case_id == case_id:
+                                st.session_state.selected_case_id = None
+                            st.session_state[f"show_del_confirm_{case_id}"] = False
+                            st.success(f"Case {case_id} deleted.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting: {e}")
+                with del_c2:
+                    if st.button("Cancel", key=f"confirm_del_no_{case_id}", use_container_width=True):
+                        st.session_state[f"show_del_confirm_{case_id}"] = False
+                        st.rerun()
 
 # =====================================================================
 # CASE DETAIL & REVIEWER CONTROLS (Right Pane)
@@ -283,9 +375,19 @@ with col_detail:
             review_st = case_data.get("review_status", "pending")
             ai_st = case_data.get("ai_status", "pending")
             rule_ver = case_data.get("triage_rule_version", "v1.0.0-prototype")
+            decision_path = case_data.get("decision_path") or "model_urgency_reasoning"
             ml_details = case_data.get("ml_details") or {}
             model_status = ml_details.get("model_status", "available")
             imputed_feats = ml_details.get("imputed_features") or []
+
+            rule_t = rule_prio
+            ml_t = ml_prio
+            is_concordant = (rule_t == ml_t)
+            concordance_badge = (
+                '<span style="background-color: #ECFDF5; color: #065F46; border: 1px solid #6EE7B7; padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">✅ Models Concordant</span>'
+                if is_concordant else
+                f'<span style="background-color: #FFF7ED; color: #C2410C; border: 1.5px solid #FDBA74; padding: 4px 10px; border-radius: 12px; font-weight: 700; font-size: 11.5px; display: inline-block;">⚡ Variance: Rule ({rule_t}) vs ML ({ml_t})</span>'
+            )
 
             st.markdown(f"""
             <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; padding: 14px 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px;">
@@ -294,12 +396,16 @@ with col_detail:
                     {render_priority_badge(final_prio)}
                 </div>
                 <div>
-                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ Learned ML Urgency (LightGBM)</span>
-                    {render_priority_badge(ml_prio)}
+                    <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">⚡ Learned ML Urgency</span>
+                    {render_lgbm_badge(ml_prio)}
                 </div>
                 <div>
                     <span style="font-size: 11px; text-transform: uppercase; font-weight: 700; color: #64748B; display: block; margin-bottom: 4px;">🛡️ Deterministic Safety Baseline</span>
-                    {render_priority_badge(rule_prio)}
+                    {render_rule_based_badge(rule_prio)}
+                </div>
+                <div>
+                    {concordance_badge}
+                    {render_decision_path_badge(decision_path)}
                 </div>
                 <div style="margin-left: auto; text-align: right;">
                     <span style="font-size: 12px; color: #475569; display: block;">
@@ -370,6 +476,128 @@ with col_detail:
                                 with p_cols[idx]:
                                     pct = int(p_val * 100)
                                     st.metric(label=tier, value=f"{pct}%")
+
+            # -------------------------------------------------------------
+            # CLINICIAN QUICK CONTROLS: ADJUST PRIORITY, MARK DONE, DELETE
+            # -------------------------------------------------------------
+            with st.container():
+                st.markdown("""
+                <div style="background: linear-gradient(135deg, #F8FAFC 0%, #EEF2F6 100%); border: 1.5px solid #CBD5E1; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;">
+                    <div style="font-weight: 700; font-size: 14px; color: #0F172A; margin-bottom: 6px;">
+                        ⚡ Clinician Quick Controls
+                    </div>
+                """, unsafe_allow_html=True)
+
+                # Control 1: Adjust Priority Directly
+                st.markdown("**1. Adjust Priority Category Himself:**")
+                adj_col1, adj_col2, adj_col3 = st.columns([1.1, 2.2, 1.2])
+                with adj_col1:
+                    new_sel_prio = st.selectbox(
+                        "Change Priority",
+                        ["P0", "P1", "P2", "P3", "ERR"],
+                        index=["P0", "P1", "P2", "P3", "ERR"].index(c_prio) if c_prio in ["P0", "P1", "P2", "P3", "ERR"] else 3,
+                        key=f"ctrl_prio_{sel_id}",
+                        label_visibility="collapsed"
+                    )
+                with adj_col2:
+                    override_justification = st.text_input(
+                        "Clinical Reason",
+                        placeholder="Optional reason (e.g. Bedside exam warrants urgent assessment)",
+                        key=f"ctrl_reason_{sel_id}",
+                        label_visibility="collapsed"
+                    )
+                with adj_col3:
+                    if st.button("Set Priority ↕️", key=f"ctrl_btn_prio_{sel_id}", use_container_width=True, type="secondary"):
+                        try:
+                            api_client.override_priority(
+                                case_id=sel_id,
+                                new_priority=new_sel_prio,
+                                reason=override_justification.strip() if override_justification and len(override_justification.strip()) >= 5 else f"Clinician adjusted priority to {new_sel_prio} based on clinical evaluation.",
+                                reviewer_name="Clinician Reviewer"
+                            )
+                            st.success(f"Priority adjusted to {new_sel_prio}!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to adjust priority: {e}")
+
+                # Control 2 & 3: Mark Done & Delete Patient
+                st.markdown("**2. Patient Status & Queue Management:**")
+                mgmt_col1, mgmt_col2 = st.columns([1.4, 1.2])
+                with mgmt_col1:
+                    if review_st != "done":
+                        if st.button("Mark Patient Done ✅", key=f"ctrl_btn_done_{sel_id}", type="primary", use_container_width=True, help="Mark this patient as done; moves patient to completed"):
+                            try:
+                                api_client.mark_case_done(sel_id)
+                                st.success(f"Case {sel_id} marked as Done and moved out of active queue!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error marking done: {e}")
+                    else:
+                        st.markdown('<span style="color: #065F46; font-weight: 700; font-size: 13px;">✅ Patient is marked as DONE in queue.</span>', unsafe_allow_html=True)
+                        if st.button("↩️ Reopen / Put Back in Active Queue", key=f"ctrl_btn_reopen_{sel_id}", use_container_width=True):
+                            try:
+                                api_client.reopen_case(sel_id)
+                                st.info(f"Case {sel_id} reopened.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error reopening: {e}")
+
+                with mgmt_col2:
+                    with st.expander("🗑️ Delete Patient Case", expanded=False):
+                        st.caption(f"Permanently remove {sel_id} from database.")
+                        confirm_case_del = st.checkbox(f"Confirm delete {sel_id}", key=f"del_confirm_chk_{sel_id}")
+                        if st.button("Delete Permanently ❌", key=f"del_perm_btn_{sel_id}", type="primary", disabled=not confirm_case_del, use_container_width=True):
+                            try:
+                                api_client.delete_case(sel_id)
+                                st.session_state.selected_case_id = None
+                                st.success(f"Case {sel_id} permanently deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to delete case: {e}")
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # Dual Triage Signal Comparison Section
+            with st.expander("⚖️ Dual Triage Signal Comparison (Rule-Based vs LightGBM ML)", expanded=True):
+                st.caption("Side-by-side comparison of deterministic protocol guardrails vs trained LightGBM urgency classifier:")
+                c_ml1, c_ml2 = st.columns(2)
+                with c_ml1:
+                    st.markdown(f"""
+                    <div style="background: #F8FAFC; border: 1.5px solid #CBD5E1; border-radius: 8px; padding: 12px 14px;">
+                        <div style="font-weight: 700; font-size: 14px; color: #1E293B; margin-bottom: 6px;">
+                            📋 Deterministic Rule-Based Triage
+                        </div>
+                        <div style="font-size: 18px; font-weight: 800; color: #0F172A; margin-bottom: 6px;">
+                            Assigned Tier: {rule_t}
+                        </div>
+                        <div style="font-size: 13px; color: #475569; line-height: 1.5;">
+                            <strong>Decision Pathway:</strong> {decision_path.replace('_', ' ').title()}<br>
+                            <strong>Protocol Version:</strong> {rule_ver}<br>
+                            <strong>Safety Guarantee:</strong> Deterministic ESI/MTS guardrails with unmodifiable red flag safety floors.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c_ml2:
+                    st.markdown(f"""
+                    <div style="background: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 12px 14px;">
+                        <div style="font-weight: 700; font-size: 14px; color: #166534; margin-bottom: 6px;">
+                            🌳 LightGBM Tabular Urgency Classifier
+                        </div>
+                        <div style="font-size: 18px; font-weight: 800; color: #14532D; margin-bottom: 6px;">
+                            Predicted Tier: {ml_t}
+                        </div>
+                        <div style="font-size: 13px; color: #166534; line-height: 1.5;">
+                            <strong>Model Architecture:</strong> LightGBM Gradient Boosted Decision Trees<br>
+                            <strong>Input Dimensionality:</strong> 25 Tabular Features (Vitals + MedGemma SLM Extraction)<br>
+                            <strong>Signal Role:</strong> Complementary ML acuity score for clinician comparison without overriding safety floors.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                if not is_concordant:
+                    st.warning(f"⚠️ **Triage Variance Notice**: The deterministic rule-based engine assigned **{rule_t}**, while the LightGBM classifier predicted **{ml_t}**. The system defaults to the safer rule-based tier for operational queuing, but clinician assessment should weigh both signals.")
+                else:
+                    st.success(f"✅ **High Algorithmic Confidence**: Both the deterministic protocol engine and the LightGBM machine learning classifier independently concord on **{rule_t}**.")
 
             # Triage Trigger Reasons
             reasons = case_data.get("priority_reasons", [])
