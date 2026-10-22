@@ -191,9 +191,11 @@ class DeterministicTriageEngine:
         # 2. Call trained LightGBM urgency model
         ml_model_triage = None
         model_status = "available"
+        ml_details = {}
+        ml_confidence = 0.0
         try:
             slm_features = evidence_state.get("slm_extraction") or evidence_state
-            ml_details = predict_urgency_lgbm_with_details(slm_features, parsed_vitals)
+            ml_details = predict_urgency_lgbm_with_details(slm_features, parsed_vitals) or {}
             ml_model_triage = ml_details.get("predicted_tier")
             model_status = ml_details.get("model_status", "available")
             imputed_features = ml_details.get("imputed_features", imputed_features)
@@ -201,6 +203,7 @@ class DeterministicTriageEngine:
             logger.warning(f"LightGBM ML triage prediction failed: {e}")
             model_status = "error"
             ml_model_triage = None
+            ml_details = {}
 
         # 3. Deterministic Safety Gate Decision Layer
         final_triage = rule_based_triage
@@ -212,8 +215,13 @@ class DeterministicTriageEngine:
             probs = ml_details["probabilities"]
             pred_prob = probs.get(ml_model_triage, 0.0)
             is_confident_ml = pred_prob >= 0.50
-        elif ml_confidence and ml_confidence >= 0.50:
-            is_confident_ml = True
+            ml_confidence = pred_prob
+        elif ml_details and ml_details.get("confidence") is not None:
+            try:
+                ml_confidence = float(ml_details["confidence"])
+                is_confident_ml = ml_confidence >= 0.50
+            except (ValueError, TypeError):
+                ml_confidence = 0.0
 
         if rule_based_triage in ("P0", "P1"):
             final_triage = rule_based_triage

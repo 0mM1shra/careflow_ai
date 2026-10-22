@@ -143,8 +143,6 @@ def get_lgbm_model(allow_auto_train: bool = False) -> Optional[Any]:
     if _MODEL_INSTANCE is not None:
         return _MODEL_INSTANCE
 
-    primary_dataset = resolve_primary_dataset_path()
-
     if _DEFAULT_MODEL_PATH.exists():
         try:
             loaded = joblib.load(_DEFAULT_MODEL_PATH)
@@ -157,9 +155,14 @@ def get_lgbm_model(allow_auto_train: bool = False) -> Optional[Any]:
                 return None
 
     if allow_auto_train:
-        logger.info("Explicit auto-training enabled. Training model artifact...")
-        _MODEL_INSTANCE = train_lgbm_model(primary_dataset, _DEFAULT_MODEL_PATH, class_weight="balanced")
-        return _MODEL_INSTANCE
+        try:
+            primary_dataset = resolve_primary_dataset_path()
+            logger.info("Explicit auto-training enabled. Training model artifact...")
+            _MODEL_INSTANCE = train_lgbm_model(primary_dataset, _DEFAULT_MODEL_PATH, class_weight="balanced")
+            return _MODEL_INSTANCE
+        except Exception as train_err:
+            logger.warning(f"Auto-training failed: {train_err}")
+            return None
 
     logger.warning(f"LightGBM model artifact not found at {_DEFAULT_MODEL_PATH}. Silent auto-training disabled.")
     return None
