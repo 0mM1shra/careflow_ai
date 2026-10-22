@@ -193,7 +193,7 @@ class CareFlowAPIClient:
         return resp.json()
 
     def get_model_providers(self) -> Dict[str, Any]:
-        """Fetches availability status of Standard MedGemma vs Fine-Tuned MedGemma."""
+        """Fetches availability status of Standard MedGemma vs MedGemma 4B Base SLM."""
         resp = requests.get(f"{self.base_url}/model-providers", timeout=10)
         resp.raise_for_status()
         return resp.json()
@@ -211,7 +211,7 @@ class CareFlowAPIClient:
         vitals: Optional[Dict[str, Any]] = None,
         preferred_language: str = "en"
     ) -> Dict[str, Any]:
-        """Runs identical patient input through both standard and fine-tuned MedGemma side-by-side."""
+        """Runs identical patient input through both standard and MedGemma 4B Base SLM side-by-side."""
         payload = {
             "conversation_history": conversation_history,
             "vitals": vitals or {},

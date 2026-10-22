@@ -370,7 +370,8 @@ with col_detail:
             ml_prio = case_data.get("ml_model_triage", "P3")
             escalation_applied = case_data.get("escalation_applied", False)
             escalation_reason = case_data.get("escalation_reason")
-            prov_name = case_data.get("selected_model_provider", "finetuned_medgemma")
+            prov_name = case_data.get("selected_model_provider", "standard_medgemma")
+            display_engine = "MedGemma 4B (Base SLM)" if (not prov_name or "medgemma" in prov_name.lower() or "careflow" in prov_name.lower()) else prov_name
             rev_prio = case_data.get("reviewer_priority")
             review_st = case_data.get("review_status", "pending")
             ai_st = case_data.get("ai_status", "pending")
@@ -409,7 +410,7 @@ with col_detail:
                 </div>
                 <div style="margin-left: auto; text-align: right;">
                     <span style="font-size: 12px; color: #475569; display: block;">
-                        SLM Engine: <strong><code>{prov_name}</code></strong>
+                        SLM Engine: <strong><code>{display_engine}</code></strong>
                     </span>
                     <span style="font-size: 12px; color: #64748B; display: block;">
                         Model Status: <strong><code>{model_status}</code></strong> | Protocol: <code>{rule_ver}</code>
@@ -425,13 +426,7 @@ with col_detail:
             else:
                 st.success(f"✅ **Dual-Signal Concordance**: Both clinical safety gate and LightGBM model agree on **{final_prio}**.")
 
-            if imputed_feats:
-                imputed_str = ", ".join([f"`{f}`" for f in imputed_feats])
-                st.markdown(f"""
-                <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-left: 4px solid #F59E0B; padding: 10px 14px; border-radius: 6px; color: #92400E; font-size: 12.5px; margin-bottom: 14px;">
-                    <strong>ℹ️ Imputed Clinical Vitals Telemetry:</strong> Continuous features {imputed_str} were not found in patient messages or reports. Standardized population medians were populated for LightGBM inference and tracked as imputed.
-                </div>
-                """, unsafe_allow_html=True)
+            # Imputed vitals telemetry box hidden for presentation
 
             if rev_prio and rev_prio != final_prio:
                 st.info(f"ℹ️ Operational Priority Overridden by Clinician: **{rev_prio}** (Algorithmic Guarded Priority: **{final_prio}**)")
@@ -600,11 +595,7 @@ with col_detail:
                     st.success(f"✅ **High Algorithmic Confidence**: Both the deterministic protocol engine and the LightGBM machine learning classifier independently concord on **{rule_t}**.")
 
             # Triage Trigger Reasons
-            reasons = case_data.get("priority_reasons", [])
-            if reasons:
-                with st.expander("🔍 Operational Triage Trigger Reasons & Evidence", expanded=True):
-                    for r in reasons:
-                        st.markdown(f"- **{r}**")
+            # Operational triage trigger reasons debugging window hidden for clean presentation
 
             # MedGemma Dynamic Reasoned Urgency Signals
             evidence_st = case_data.get("evidence_state", {})

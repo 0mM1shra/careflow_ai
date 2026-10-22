@@ -202,7 +202,23 @@ class DeterministicTriageEngine:
             model_status = "error"
             ml_model_triage = None
 
-        # 3. Deterministic Safety Gate Decision Layer
+        # 3. Deterministic Safety Gate Decision Layer with Strict P0 Guardrails
+        # A final priority of P0 MUST be backed by either:
+        # a) An explicit deterministic trigger (e.g., SpO2 < 92, SBP < 90, P0 rule trigger), OR
+        # b) LightGBM P0 prediction WITH an active red-flag (pain_severe=1 or onset_acute=1).
+        # If Rule-Based triage evaluates to P3 (Routine) and NO red flags exist, suppress LightGBM P0 spike and cap at P3.
+
+        feat_vec = ml_details.get("feature_vector", {}) if isinstance(ml_details, dict) else {}
+        pain_severe = int(feat_vec.get("pain_severe", 0) or 0)
+        onset_acute = int(feat_vec.get("onset_acute", 0) or 0)
+        has_active_red_flag = bool(pain_severe == 1 or onset_acute == 1)
+
+        has_deterministic_p0 = bool(rule_based_triage == "P0" or any(tr.priority == "P0" for tr in rule_result.triggered_rules))
+        if parsed_vitals.get("spo2_pct") is not None and float(parsed_vitals.get("spo2_pct", 98)) < 92.0:
+            has_deterministic_p0 = True
+        if parsed_vitals.get("systolic_bp") is not None and float(parsed_vitals.get("systolic_bp", 120)) < 90.0:
+            has_deterministic_p0 = True
+
         final_triage = rule_based_triage
         escalation_applied = False
         escalation_reason = None
@@ -214,22 +230,45 @@ class DeterministicTriageEngine:
                 rule_name = rule_result.triggered_rules[0].rule_name if rule_result.triggered_rules else "Emergency Red Flag"
                 escalation_reason = f"Deterministic emergency override: Protocol rule '{rule_name}' mandates {rule_based_triage}. Lower-acuity ML prediction ({ml_model_triage}) suppressed for patient safety."
             elif ml_model_triage == "P0" and rule_based_triage == "P1":
-                final_triage = "P0"
-                escalation_applied = True
-                escalation_reason = "Escalated to P0 (Resuscitation) based on multi-system ML physiological urgency prediction."
+                if has_deterministic_p0 or has_active_red_flag:
+                    final_triage = "P0"
+                    escalation_applied = True
+                    escalation_reason = "Escalated to P0 (Resuscitation) based on multi-system ML physiological urgency prediction confirmed by active clinical red flags."
+                else:
+                    final_triage = "P1"
+                    escalation_applied = False
+                    escalation_reason = "Urgent tier P1 verified by clinical protocol. P0 escalation suppressed due to absence of critical physiological decompensation."
             else:
                 escalation_applied = False
                 escalation_reason = f"Emergency tier {rule_based_triage} verified by clinical protocol."
         else:
+            # Baseline rule triage is P2 or P3
             if model_status == "available" and ml_model_triage:
-                final_triage = ml_model_triage
-                if ml_model_triage in ("P0", "P1"):
-                    escalation_applied = True
-                    escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
+                if ml_model_triage == "P0":
+                    if has_deterministic_p0 or has_active_red_flag:
+                        final_triage = "P0"
+                        escalation_applied = True
+                        escalation_reason = "Learned urgency escalation: LightGBM detected critical physiological decompensation confirmed by active red flags."
+                    else:
+                        # Suppress false P0 spike on routine complaints
+                        final_triage = rule_based_triage  # Routine P3 or P2
+                        escalation_applied = False
+                        escalation_reason = f"LightGBM P0 spike suppressed: Routine complaint with no active red flags, severe pain, or vital sign instability; capped at {rule_based_triage}."
+                elif ml_model_triage == "P1":
+                    if has_active_red_flag or rule_based_triage == "P2":
+                        final_triage = "P1"
+                        escalation_applied = True
+                        escalation_reason = f"Learned urgency escalation: LightGBM detected high-acuity physiological risk ({ml_model_triage}) exceeding baseline rules ({rule_based_triage})."
+                    else:
+                        final_triage = rule_based_triage
+                        escalation_applied = False
+                        escalation_reason = f"ML P1 modulated to {final_triage} due to absent red flags in routine complaint."
                 elif ml_model_triage != rule_based_triage:
+                    final_triage = ml_model_triage
                     escalation_applied = True
                     escalation_reason = f"ML model triage ({ml_model_triage}) calibrated from clinical training distribution."
                 else:
+                    final_triage = rule_based_triage
                     escalation_applied = False
                     escalation_reason = f"Concordant tier {final_triage} between ML model and clinical protocol."
             else:

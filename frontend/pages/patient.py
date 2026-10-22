@@ -297,7 +297,7 @@ UI_TEXT = {
 if "selected_lang" not in st.session_state:
     st.session_state.selected_lang = "🌐 Auto-Detect Language (स्वचालित भाषा पहचान)"
 if "selected_model_provider" not in st.session_state:
-    st.session_state.selected_model_provider = "finetuned_medgemma"
+    st.session_state.selected_model_provider = "standard_medgemma"
 if "case_id" not in st.session_state:
     st.session_state.case_id = None
 if "intake_step" not in st.session_state:
@@ -325,7 +325,7 @@ if "pending_voice_start" not in st.session_state:
 if "pending_doc_preview" not in st.session_state:
     st.session_state.pending_doc_preview = None
 
-# Sidebar Controls: Language and Clinical SLM Engine
+# Sidebar Controls: Language Preference
 lang_options = ["🌐 Auto-Detect Language (स्वचालित भाषा पहचान)", "🇬🇧 English", "🇮🇳 हिन्दी (Hindi)"]
 with st.sidebar:
     st.markdown("### 🌐 Language / भाषा")

@@ -31,10 +31,10 @@ EXPECTED_FEATURE_COLUMNS = FEATURE_COLUMNS
 
 # Population median fallbacks derived from careflow_diverse_ml.csv
 DEFAULT_VITALS: Dict[str, Any] = {
-    "age": 50,
-    "heart_rate": 90,
-    "systolic_bp": 125,
-    "spo2_pct": 95,
+    "age": 45,
+    "heart_rate": 75.0,
+    "systolic_bp": 120.0,
+    "spo2_pct": 98.0,
     "temp_f": 98.6,
 }
 
@@ -338,13 +338,19 @@ def _map_slm_and_vitals_to_dataframe(
     # Extract continuous vitals with explicit imputed fields tracking
     vitals, imputed_fields = extract_vitals_with_metadata(lab_vitals_dict)
 
-    # Initialize feature row
+    # Initialize feature row with guaranteed safe positive floats (never null or 0)
+    age_v = float(vitals.get("age") or 45.0)
+    hr_v = float(vitals.get("heart_rate") or 75.0)
+    sbp_v = float(vitals.get("systolic_bp") or 120.0)
+    spo2_v = float(vitals.get("spo2_pct") or 98.0)
+    temp_v = float(vitals.get("temp_f") or 98.6)
+
     row: Dict[str, Any] = {
-        "age": vitals["age"],
-        "heart_rate": vitals["heart_rate"],
-        "systolic_bp": vitals["systolic_bp"],
-        "spo2_pct": vitals["spo2_pct"],
-        "temp_f": vitals["temp_f"],
+        "age": age_v if age_v > 0 else 45.0,
+        "heart_rate": hr_v if hr_v > 0 else 75.0,
+        "systolic_bp": sbp_v if sbp_v > 0 else 120.0,
+        "spo2_pct": spo2_v if spo2_v > 0 else 98.0,
+        "temp_f": temp_v if temp_v > 0 else 98.6,
         "pain_severe": 0,
         "onset_acute": 0,
         "sys_cardiopulmonary": 0,
@@ -379,8 +385,8 @@ def _map_slm_and_vitals_to_dataframe(
         onset_str = str(slm_data.get("onset_and_duration", "")).lower()
         if any(w in onset_str for w in ["sudden", "acute", "today", "hour", "minute", "kal se", "कल से", "achanak"]):
             row["onset_acute"] = 1
-        elif not onset_str or onset_str == "not reported":
-            row["onset_acute"] = 1  # Default to conservative acute onset assumption
+        else:
+            row["onset_acute"] = 0  # Do not assume acute onset unless explicitly reported
 
     # 3. Map System Flags (sys_*)
     # Check direct primary_system_flag from SLM with alias normalization

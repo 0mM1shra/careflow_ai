@@ -172,10 +172,10 @@ def construct_tabular_features(slm_json: Dict[str, Any], vitals_dict: Optional[D
         gender = float(raw_gender)
 
     bmi = float(vitals.get("bmi", 25.0))
-    hr = float(vitals.get("heart_rate", 75.0))
-    sys_bp = float(vitals.get("sys_bp", vitals.get("systolic_bp", 120.0)))
+    hr = float(vitals.get("heart_rate") or 75.0); hr = hr if hr > 0 else 75.0
+    sys_bp = float(vitals.get("sys_bp") or vitals.get("systolic_bp") or 120.0); sys_bp = sys_bp if sys_bp > 0 else 120.0
     dia_bp = float(vitals.get("dia_bp", vitals.get("diastolic_bp", 80.0)))
-    spo2 = float(vitals.get("spo2_pct", vitals.get("spo2", 98.0)))
+    spo2 = float(vitals.get("spo2_pct") or vitals.get("spo2") or 98.0); spo2 = spo2 if spo2 > 0 else 98.0
     rr = float(vitals.get("resp_rate", vitals.get("respiratory_rate", 16.0)))
     temp_f = _parse_temperature_f(vitals)
     pain = _parse_pain_score(slm, vitals)

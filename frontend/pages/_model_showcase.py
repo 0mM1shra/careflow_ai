@@ -78,12 +78,12 @@ st.markdown("""
     </div>
     <div style="font-size: 15px; opacity: 0.95; line-height: 1.5;">
         Tri-Model Clinical Architecture: <strong>Deepgram Nova-2 Multilingual ASR</strong> &rarr; 
-        <strong>Fine-Tuned MedGemma 4B SLM (QLoRA)</strong> &rarr; 
+        <strong>MedGemma 4B Base SLM</strong> &rarr; 
         <strong>LightGBM 15-Feature Urgency Classifier</strong> &rarr; 
         <strong>Deterministic ESI/MTS Safety Guardrail</strong>
     </div>
     <div style="margin-top: 10px;">
-        <span class="feature-chip">Fine-Tuned MedGemma 4B SLM</span>
+        <span class="feature-chip">MedGemma 4B Base SLM</span>
         <span class="feature-chip">LightGBM (6,000 Cases)</span>
         <span class="feature-chip">Deepgram Hinglish STT/TTS</span>
         <span class="feature-chip">Multimodal OCR</span>
@@ -340,7 +340,7 @@ with main_tab2:
     st.subheader("⚖️ Dedicated Model Comparison Mode")
     st.markdown("""
     Evaluate identical patient inputs simultaneously through **Mode A (Standard MedGemma API)** and 
-    **Mode B (CareFlow Fine-Tuned MedGemma 4B)**. Compare follow-up question quality, structured feature 
+    **Mode B (CareFlow MedGemma 4B Base SLM 4B)**. Compare follow-up question quality, structured feature 
     extraction accuracy, schema validation, response latency, and downstream LightGBM predictions side-by-side.
     """)
 
@@ -455,18 +455,18 @@ with main_tab2:
                     with p_c[i]:
                         st.metric(t, f"{int(std_probs.get(t, 0.0) * 100)}%")
 
-        # Mode B: Fine-Tuned MedGemma
+        # Mode B: MedGemma 4B Base SLM
         with col_ft:
             st.markdown(f"""
             <div class="comp-col-card" style="border-top: 4px solid #0284C7; background: #F8FAFC;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <h3 style="margin: 0; font-size: 18px; color: #0369A1;">Mode B: Fine-Tuned MedGemma (Ollama / LoRA)</h3>
+                    <h3 style="margin: 0; font-size: 18px; color: #0369A1;">Mode B: MedGemma 4B Base SLM (Ollama / LoRA)</h3>
                     <span style="font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px; background: #E0F2FE; color: #0284C7;">
                         ⚡ {ft_m.get('latency_ms', 0)} ms
                     </span>
                 </div>
                 <div style="font-size: 12px; color: #64748B; margin-bottom: 12px;">
-                    Runtime: <code>careflow-slm:latest (GPU Q4_K_M)</code> | Schema: <strong>{ft_m.get('validation_status', 'valid').upper()}</strong>
+                    Runtime: <code>MedGemma 4B Base SLM:latest (GPU Q4_K_M)</code> | Schema: <strong>{ft_m.get('validation_status', 'valid').upper()}</strong>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -502,12 +502,12 @@ with main_tab2:
         st.markdown("---")
         st.markdown("#### 📋 Comparative Delta Summary")
         delta_data = [
-            {"Dimension": "Runtime & Execution", "Standard MedGemma (Mode A)": f"Hosted API / Fallback ({std_m.get('latency_ms', 0)} ms)", "Fine-Tuned MedGemma (Mode B)": f"Local Ollama / LoRA ({ft_m.get('latency_ms', 0)} ms)"},
-            {"Dimension": "Schema Validation Status", "Standard MedGemma (Mode A)": std_m.get("validation_status", "valid").title(), "Fine-Tuned MedGemma (Mode B)": ft_m.get("validation_status", "valid").title()},
-            {"Dimension": "Primary Organ System", "Standard MedGemma (Mode A)": str(std_sys), "Fine-Tuned MedGemma (Mode B)": str(ft_sys)},
-            {"Dimension": "Severe Pain Detection", "Standard MedGemma (Mode A)": str(std_pain), "Fine-Tuned MedGemma (Mode B)": str(ft_pain)},
-            {"Dimension": "Acute Onset Detection", "Standard MedGemma (Mode A)": str(std_onset), "Fine-Tuned MedGemma (Mode B)": str(ft_onset)},
-            {"Dimension": "LightGBM Predicted Urgency", "Standard MedGemma (Mode A)": f"Tier {p_std}", "Fine-Tuned MedGemma (Mode B)": f"Tier {p_ft}"},
+            {"Dimension": "Runtime & Execution", "Standard MedGemma (Mode A)": f"Hosted API / Fallback ({std_m.get('latency_ms', 0)} ms)", "MedGemma 4B Base SLM (Mode B)": f"Local Ollama / LoRA ({ft_m.get('latency_ms', 0)} ms)"},
+            {"Dimension": "Schema Validation Status", "Standard MedGemma (Mode A)": std_m.get("validation_status", "valid").title(), "MedGemma 4B Base SLM (Mode B)": ft_m.get("validation_status", "valid").title()},
+            {"Dimension": "Primary Organ System", "Standard MedGemma (Mode A)": str(std_sys), "MedGemma 4B Base SLM (Mode B)": str(ft_sys)},
+            {"Dimension": "Severe Pain Detection", "Standard MedGemma (Mode A)": str(std_pain), "MedGemma 4B Base SLM (Mode B)": str(ft_pain)},
+            {"Dimension": "Acute Onset Detection", "Standard MedGemma (Mode A)": str(std_onset), "MedGemma 4B Base SLM (Mode B)": str(ft_onset)},
+            {"Dimension": "LightGBM Predicted Urgency", "Standard MedGemma (Mode A)": f"Tier {p_std}", "MedGemma 4B Base SLM (Mode B)": f"Tier {p_ft}"},
         ]
         st.dataframe(pd.DataFrame(delta_data), use_container_width=True, hide_index=True)
 
@@ -518,7 +518,7 @@ with main_tab3:
     st.subheader("🔬 Deep-Dive Architectural Specifications")
 
     tab_slm, tab_ml, tab_speech, tab_safety = st.tabs([
-        "🧠 Fine-Tuned MedGemma 4B SLM",
+        "🧠 MedGemma 4B Base SLM",
         "⚡ LightGBM Urgency Classifier",
         "🎙️ Deepgram Hinglish ASR & OCR",
         "🛡️ Dual-Signal Safety Protocol"
@@ -529,7 +529,7 @@ with main_tab3:
         ### Google MedGemma 4B Instruction-Tuned (Fine-Tuned Adapter)
         - **LoRA Adapter:** `careflow-medgemma-final`
         - **Base Model:** `unsloth/medgemma-4b-it-unsloth-bnb-4bit` (Gemma-3 architecture)
-        - **Local Ollama Runtime:** `careflow-slm:latest` via `D:\\careflow_ai\\models\\medgemma-4b-it.Q4_K_M.gguf`
+        - **Local Ollama Runtime:** `MedGemma 4B Base SLM:latest` via `D:\\careflow_ai\\models\\medgemma-4b-it.Q4_K_M.gguf`
         - **PEFT Method:** QLoRA with rank $r=8$, alpha $\\alpha=16$, dropout $0.0$
         - **Target Attention Modules:** `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
         - **Training Data:** 6,000 diverse bilingual clinical intake turns from `careflow_diverse_slm.jsonl`

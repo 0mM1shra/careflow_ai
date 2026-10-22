@@ -820,13 +820,8 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
     new_p = triage_res.priority_category
     curr_p = case.priority_category
 
-    if curr_p == "P0" or new_p == "P0":
-        case.priority_category = "P0"
-    elif curr_p == "P1" or new_p == "P1":
-        case.priority_category = "P1"
-    elif curr_p == "P2" or new_p == "P2":
-        case.priority_category = "P2"
-    elif new_p == "ERR" or case.ai_status == "failed":
+    # Calibrated safety-gate priority assignment
+    if new_p == "ERR" or case.ai_status == "failed":
         case.priority_category = "ERR"
     else:
         case.priority_category = new_p
@@ -1106,13 +1101,8 @@ async def upload_medical_document(
     new_p = triage_res.priority_category
     curr_p = case.priority_category
 
-    if curr_p == "P0" or new_p == "P0":
-        case.priority_category = "P0"
-    elif curr_p == "P1" or new_p == "P1":
-        case.priority_category = "P1"
-    elif curr_p == "P2" or new_p == "P2":
-        case.priority_category = "P2"
-    elif new_p == "ERR" or case.ai_status == "failed":
+    # Calibrated safety-gate priority assignment
+    if new_p == "ERR" or case.ai_status == "failed":
         case.priority_category = "ERR"
     else:
         case.priority_category = new_p

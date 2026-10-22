@@ -106,13 +106,7 @@ else:
     st.sidebar.caption("Ensure FastAPI is running: `uvicorn backend.main:app --port 8000`")
 
 st.sidebar.divider()
-st.sidebar.subheader("Navigation")
-st.sidebar.page_link("pages/patient.py", label="Patient Interface", icon="🩺")
-st.sidebar.page_link("pages/reviewer.py", label="Reviewer Dashboard", icon="📋")
-st.sidebar.page_link("pages/model_showcase.py", label="AI Innovation Showcase", icon="🚀")
-
-st.sidebar.divider()
-st.sidebar.caption("CareFlow • MedGemma 4B Instruction-Tuned Prototype")
+st.sidebar.caption("CareFlow • MedGemma 4B (Base SLM) Prototype")
 
 # Landing Page Content
 col1, col2 = st.columns(2)
@@ -153,39 +147,3 @@ with col2:
     """, unsafe_allow_html=True)
     if st.button("Open Reviewer Dashboard →", use_container_width=True):
         st.switch_page("pages/reviewer.py")
-
-st.divider()
-
-col_showcase, col_info = st.columns([1, 1])
-
-with col_showcase:
-    st.markdown("""
-    <div class="card">
-        <div class="card-title">🚀 AI Innovation & Model Showcase</div>
-        <div class="card-desc">
-            Explore our state-of-the-art multi-model clinical intelligence architecture:
-            <ul>
-                <li><strong>Fine-Tuned MedGemma 4B SLM</strong>: QLoRA LoRA adapter trained on 6,000 diverse bilingual dialogues.</li>
-                <li><strong>LightGBM 15-Feature Classifier</strong>: Cost-sensitive multiclass urgency prediction with 100% precision/recall.</li>
-                <li><strong>Deepgram Nova-2 ASR & Aura TTS</strong>: Automatic Hinglish code-switching and medical voice read-back.</li>
-                <li><strong>Interactive Live Playground</strong>: Test clinical scenarios in real time.</li>
-            </ul>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    if st.button("Launch AI Model Showcase & Live Playground →", type="primary", use_container_width=True):
-        st.switch_page("pages/model_showcase.py")
-
-with col_info:
-    st.markdown("""
-    <div class="card">
-        <div class="card-title">🛡️ System Architecture & Guardrails</div>
-        <div class="card-desc">
-            <strong>Generative AI Model:</strong> Google MedGemma 4B (Instruction-Tuned with LoRA).<br/>
-            <strong>Tabular Classifier:</strong> LightGBM 15-Feature Gradient Boosted Urgency Engine.<br/>
-            <strong>Triage Rules:</strong> Deterministic safety protocol (Manchester Triage System & ESI adapted).<br/>
-            <strong>Prompt Injection Defense:</strong> Patient text treated strictly as untrusted clinical input inside XML tags.<br/>
-            <strong>Fail-Safe State:</strong> If AI or model inference fails, case enters visible <code>ERR: Review required — AI unavailable</code> state.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
