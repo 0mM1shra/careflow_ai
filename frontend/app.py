@@ -16,8 +16,8 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# Custom Clean Clinical Dashboard CSS
-st.markdown("""
+# Custom Clean Clinical Dashboard CSS assigned explicitly to variable
+html_content = """
 <style>
     /* Clean typography & spacing */
     .main {
@@ -99,27 +99,30 @@ st.markdown("""
         margin-bottom: 12px;
     }
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(html_content, unsafe_allow_html=True)
 
 # Hospital Header
-st.markdown("""
+header_html = """
 <div class="header-box">
     <div class="header-title">🏥 CareFlow Health System</div>
     <div class="header-subtitle">
         Clinical Symptom Intake, Multilingual Emergency Triage & Decision Support Command Center
     </div>
 </div>
-""", unsafe_allow_html=True)
+"""
+st.markdown(header_html, unsafe_allow_html=True)
 
 # Clinical Safety Notice
-st.markdown("""
+disclaimer_html = """
 <div class="disclaimer-banner">
     <strong>⚠️ Clinical Protocol Notice:</strong>
     CareFlow provides automated conversational symptom intake and algorithmic triage classification.
     All assessments require evaluation by a licensed healthcare professional.
     <strong>In a life-threatening medical emergency, immediately call 112 / 911 or visit the nearest hospital emergency room.</strong>
 </div>
-""", unsafe_allow_html=True)
+"""
+st.markdown(disclaimer_html, unsafe_allow_html=True)
 
 # Sidebar System Health Status
 health = api_client.get_health()
@@ -145,7 +148,7 @@ st.sidebar.page_link("pages/reviewer.py", label="Clinician Reviewer Portal", ico
 col_patient, col_reviewer = st.columns(2)
 
 with col_patient:
-    st.markdown("""
+    patient_card_html = """
     <div class="card">
         <div>
             <span class="hospital-badge">PATIENT ACCESS PORTAL</span>
@@ -162,12 +165,13 @@ with col_patient:
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(patient_card_html, unsafe_allow_html=True)
     if st.button("Launch Patient Intake Portal →", type="primary", use_container_width=True, key="btn_launch_patient"):
         st.switch_page("pages/patient.py")
 
 with col_reviewer:
-    st.markdown("""
+    reviewer_card_html = """
     <div class="card">
         <div>
             <span class="hospital-badge" style="background:#FEE2E2; color:#991B1B;">STAFF & CLINICIAN ACCESS ONLY</span>
@@ -183,7 +187,8 @@ with col_reviewer:
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(reviewer_card_html, unsafe_allow_html=True)
     
     if st.button("Open Reviewer Dashboard →", type="primary", use_container_width=True, key="btn_auth_reviewer"):
         st.switch_page("pages/reviewer.py")
@@ -194,7 +199,7 @@ st.divider()
 col_arch1, col_arch2 = st.columns(2)
 
 with col_arch1:
-    st.markdown("""
+    arch1_html = """
     <div class="card">
         <div class="card-title">🛡️ Clinical Protocol Standards</div>
         <div class="card-desc">
@@ -207,10 +212,11 @@ with col_arch1:
             </ul>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(arch1_html, unsafe_allow_html=True)
 
 with col_arch2:
-    st.markdown("""
+    arch2_html = """
     <div class="card">
         <div class="card-title">⚙️ Integrated Clinical Intelligence</div>
         <div class="card-desc">
@@ -221,4 +227,5 @@ with col_arch2:
             <strong>Human-in-the-Loop:</strong> Mandatory clinician review with comprehensive audit logs and override tracking.
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(arch2_html, unsafe_allow_html=True)
