@@ -129,17 +129,52 @@ def health_check(db: Session = Depends(get_db)):
         medgemma_status="ready" if model_info["is_ready"] else "unavailable",
 
         triage_rule_version=settings.TRIAGE_RULE_VERSION
-
     )
 
+class MedGemmaConfigRequest(BaseModel):
+    mode: str = "hosted"
+    endpoint: str = ""
 
+@router.post("/settings/medgemma")
+@router.post("/api/settings/medgemma")
+def update_medgemma_settings(req: MedGemmaConfigRequest):
+    """Dynamically connects CareFlow to a Google Colab GPU / remote inference endpoint."""
+    endpoint = req.endpoint.strip()
+    if endpoint and not any(s in endpoint for s in ("/v1/chat/completions", "/api/medgemma/triage", "/generate")):
+        endpoint = f"{endpoint.rstrip('/')}/v1/chat/completions"
 
+    gpu_name = "Cloud GPU"
+    status_msg = "connected"
+    if endpoint:
+        try:
+            import requests as _requests
+            base_test = endpoint.split("/v1/")[0]
+            resp = _requests.get(f"{base_test}/health", timeout=6)
+            if resp.status_code == 200:
+                info = resp.json()
+                gpu_name = info.get("gpu", "NVIDIA GPU")
+            else:
+                status_msg = f"HTTP {resp.status_code}"
+        except Exception as e:
+            status_msg = f"Warning: {e}"
 
+    target_mode = req.mode if endpoint else "local"
+    medgemma_service.mode = target_mode
+    medgemma_service.endpoint = endpoint
+    settings.MEDGEMMA_MODE = target_mode
+    settings.MEDGEMMA_ENDPOINT = endpoint
+    logger.info(f"Dynamically updated MedGemma settings: mode={target_mode}, endpoint={endpoint}")
+
+    return {
+        "status": "connected" if "Warning" not in status_msg else "warning",
+        "message": status_msg,
+        "mode": target_mode,
+        "endpoint": endpoint,
+        "gpu": gpu_name
+    }
 
 # -------------------------------------------------------------
-
 # Case Management
-
 # -------------------------------------------------------------
 
 @router.post("/cases", status_code=status.HTTP_201_CREATED)

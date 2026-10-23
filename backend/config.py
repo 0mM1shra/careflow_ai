@@ -8,10 +8,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load environment variables from .env
 load_dotenv(BASE_DIR / ".env")
 
+# If running under Streamlit Cloud, inject st.secrets into os.environ
+try:
+    import streamlit as _st
+    if hasattr(_st, "secrets"):
+        for _k, _v in _st.secrets.items():
+            if _k not in os.environ and isinstance(_v, (str, int, float, bool)):
+                os.environ[_k] = str(_v)
+except Exception:
+    pass
+
 class Settings:
     BASE_DIR: Path = BASE_DIR
-    # 3-Mode Model Router: 'base_ollama' (default base medgemma-4b-it), 'finetuned_ollama', or 'external_api'
-    MEDGEMMA_BACKEND_MODE: str = os.getenv("MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
+    # 3-Mode Model Router: 'base_ollama' (default base medgemma-4b-it), 'finetuned_ollama', 'external_api', or 'hosted'
+    MEDGEMMA_BACKEND_MODE: str = os.getenv("MEDGEMMA_BACKEND_MODE", "hosted").lower()
     BASE_OLLAMA_MODEL: str = os.getenv("BASE_OLLAMA_MODEL", "medgemma-4b-it")
 
     # Universal OpenAI-Compatible External API (Groq, OpenRouter, Colab vLLM, Gemini)
@@ -36,7 +46,7 @@ class Settings:
     STANDARD_MEDGEMMA_MODEL_ID: str = os.getenv("STANDARD_MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
     
     # Hosted Endpoint & API Key (supports MEDGEMMA_API_KEY or standard HF_TOKEN)
-    MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "")
+    MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "https://refuse-overhead-efficiently-hoped.trycloudflare.com/v1/chat/completions")
     MEDGEMMA_API_KEY: str = os.getenv("MEDGEMMA_API_KEY", os.getenv("HF_TOKEN", ""))
     
     # Local Quantization: '4bit', '8bit', or 'none'

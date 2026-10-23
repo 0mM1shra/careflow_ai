@@ -276,6 +276,10 @@ def get_localized_question(msg_obj: dict, target_lang: str) -> str:
 
     return base_text
 
+# Render standardized sidebar with Colab GPU controls & navigation
+from frontend.sidebar import render_careflow_sidebar
+render_careflow_sidebar(current_page="patient")
+
 # Initialize Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []

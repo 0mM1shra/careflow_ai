@@ -70,6 +70,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Render standardized sidebar with Colab GPU controls & navigation
+from frontend.sidebar import render_careflow_sidebar
+render_careflow_sidebar(current_page="architecture")
+
 # Page Header
 st.markdown("""
 <div class="showcase-header">

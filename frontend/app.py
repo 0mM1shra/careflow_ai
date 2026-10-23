@@ -121,25 +121,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar System Health Status
-health = api_client.get_health()
-st.sidebar.title("⚙️ System Status")
-
-if health.get("status") == "healthy":
-    st.sidebar.success("🟢 Hospital Backend API: Online")
-    st.sidebar.info("🧠 Clinical Intelligence: **Google MedGemma**")
-    st.sidebar.info("🌳 Urgency Engine: **LightGBM ML Classifier**")
-    st.sidebar.info("🎙️ Voice Pipeline: **Deepgram Nova-2 & Aura**")
-    st.sidebar.caption(f"Triage Protocol: {health.get('triage_rule_version', 'v1.0.0-clinical')}")
-    st.sidebar.caption("Data Store: Verified SQLite Database")
-else:
-    st.sidebar.error("🔴 Hospital Backend API: Offline or Unreachable")
-    st.sidebar.caption("Ensure FastAPI is running: `uvicorn backend.main:app --port 8000`")
-
-st.sidebar.divider()
-st.sidebar.subheader("Navigation")
-st.sidebar.page_link("pages/patient.py", label="Patient Intake Portal", icon="🩺")
-st.sidebar.page_link("pages/model_showcase.py", label="Model Inference & Architecture", icon="🧠")
+# Sidebar System Health Status & Colab GPU Controls
+from frontend.sidebar import render_careflow_sidebar
+render_careflow_sidebar(current_page="home")
 
 # Role-Based Portals
 col_patient, col_reviewer = st.columns(2)

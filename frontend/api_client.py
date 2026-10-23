@@ -95,6 +95,20 @@ class CareFlowAPIClient:
         except Exception as e:
             return {"status": "offline", "error": str(e)}
 
+    def update_medgemma_config(self, endpoint: str, mode: str = "hosted") -> Dict[str, Any]:
+        """Dynamically configures MedGemma execution mode and endpoint URL."""
+        try:
+            resp = requests.post(
+                f"{self.base_url}/settings/medgemma",
+                json={"mode": mode, "endpoint": endpoint},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return {"status": "error", "error": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     def create_case(
         self,
         preferred_language: str = "English",
