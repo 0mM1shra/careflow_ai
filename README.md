@@ -460,4 +460,5 @@ CareFlow AI was engineered for the **Inter IIT Tech Meet / General Championship*
 
 - **Repository**: [https://github.com/0mM1shra/careflow_ai](https://github.com/0mM1shra/careflow_ai)
 - **Author**: Om Mishra ([@0mM1shra](https://github.com/0mM1shra))
+- **Contributor**: Sutirth Dubey ([@Sutirthdubey20005](https://github.com/Sutirthdubey20005))
 - **License**: MIT License (Open Research & Educational Use).
