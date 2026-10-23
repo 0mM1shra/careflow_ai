@@ -46,7 +46,7 @@ class Settings:
     STANDARD_MEDGEMMA_MODEL_ID: str = os.getenv("STANDARD_MEDGEMMA_MODEL_ID", "google/medgemma-1.5-4b-it")
     
     # Hosted Endpoint & API Key (supports MEDGEMMA_API_KEY or standard HF_TOKEN)
-    MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "https://refuse-overhead-efficiently-hoped.trycloudflare.com/v1/chat/completions")
+    MEDGEMMA_ENDPOINT: str = os.getenv("MEDGEMMA_ENDPOINT", "https://precious-growth-seems-cedar.trycloudflare.com/v1/chat/completions")
     MEDGEMMA_API_KEY: str = os.getenv("MEDGEMMA_API_KEY", os.getenv("HF_TOKEN", ""))
     
     # Local Quantization: '4bit', '8bit', or 'none'

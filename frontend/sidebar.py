@@ -35,7 +35,7 @@ def render_careflow_sidebar(current_page: str = ""):
     active_endpoint = os.getenv("MEDGEMMA_ENDPOINT", "") or st.session_state.get("colab_endpoint", "")
     default_val = st.session_state.get(
         "colab_endpoint",
-        active_endpoint or "https://refuse-overhead-efficiently-hoped.trycloudflare.com/v1/chat/completions"
+        active_endpoint or "https://precious-growth-seems-cedar.trycloudflare.com/v1/chat/completions"
     )
 
     with st.sidebar.expander("🔗 Connect Colab GPU Tunnel", expanded=True):
