@@ -9,6 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 class Settings:
+    BASE_DIR: Path = BASE_DIR
     # 3-Mode Model Router: 'base_ollama' (default base medgemma-4b-it), 'finetuned_ollama', or 'external_api'
     MEDGEMMA_BACKEND_MODE: str = os.getenv("MEDGEMMA_BACKEND_MODE", "base_ollama").lower()
     BASE_OLLAMA_MODEL: str = os.getenv("BASE_OLLAMA_MODEL", "medgemma-4b-it")
@@ -40,9 +41,10 @@ class Settings:
     
     # Local Quantization: '4bit', '8bit', or 'none'
     MEDGEMMA_LOCAL_QUANTIZATION: str = os.getenv("MEDGEMMA_LOCAL_QUANTIZATION", "4bit")
+    MEDGEMMA_LOCAL_GGUF_PATH: str = os.getenv("MEDGEMMA_LOCAL_GGUF_PATH", str(BASE_DIR / "models" / "medgemma-4b-it-Q4_K_M.gguf"))
     
     # Model timeouts and retries
-    MODEL_TIMEOUT_SECONDS: int = int(os.getenv("MODEL_TIMEOUT_SECONDS", "180"))
+    MODEL_TIMEOUT_SECONDS: int = int(os.getenv("MODEL_TIMEOUT_SECONDS", "300"))
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "15"))
 

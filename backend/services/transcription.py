@@ -287,6 +287,8 @@ class TranscriptionService:
                 speak_opts = SpeakOptions(model=model or "aura-asteria-en") if SpeakOptions else {"model": model or "aura-asteria-en"}
                 resp = deepgram_client.speak.rest.v("1").stream_raw({"text": text}, speak_opts)
                 if resp.status_code == 200:
+                    if hasattr(resp, "read"):
+                        return resp.read()
                     return resp.content
                 raise TranscriptionError(f"Deepgram TTS returned HTTP {resp.status_code}: {resp.text[:150]}")
             elif hasattr(deepgram_client, "speak") and hasattr(deepgram_client.speak, "v1"):
