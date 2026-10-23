@@ -105,7 +105,11 @@ class MedGemmaService:
         )
 
     def has_local_gguf(self) -> bool:
-        """Checks if quantized MedGemma GGUF weights exist locally on disk (>1 GB)."""
+        """Checks if quantized MedGemma GGUF weights exist locally on disk (>1 GB) AND llama_cpp is importable."""
+        try:
+            import llama_cpp
+        except (ImportError, Exception):
+            return False
         target = self.local_gguf_path
         if not target.is_absolute():
             target = settings.BASE_DIR / target
@@ -417,7 +421,7 @@ class MedGemmaService:
                 return self._local_inference(full_prompt)
             elif self.is_ollama_available():
                 return self._call_ollama(full_prompt)
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
                 return self._mock_inference(full_prompt)
             raise ModelInferenceError("No local neural weights found and mock fallback is disabled.")
         else:
@@ -560,10 +564,17 @@ class MedGemmaService:
         active_provider = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
         has_hosted_creds = bool(self.endpoint or self.api_key or os.getenv("HF_TOKEN"))
 
-        # 1. Local Mode First (Zero Cloud Overhead, Auto-detects GPU)
-        if self.mode in ("local", "mock") or backend_mode == "local":
-            if self.has_local_gguf():
-                logger.info("Executing turn via Local Neural MedGemma 4B SLM (llama-cpp CPU/GPU-ready)...")
+        # 1. Local Neural Inference via Ollama or GGUF (Zero Cloud Overhead, Auto-detects GPU)
+        if self.mode in ("local", "mock") or backend_mode in ("base_ollama", "finetuned_ollama", "local"):
+            if self.is_ollama_available():
+                model = getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
+                if active_provider == "finetuned_medgemma" and self.is_ollama_available(settings.OLLAMA_MODEL):
+                    model = settings.OLLAMA_MODEL
+                logger.info(f"Executing turn via local Ollama neural model '{model}'...")
+                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=180)
+                return raw, f"ollama:{model}"
+            elif self.has_local_gguf():
+                logger.info("Executing turn via Local Neural MedGemma 4B SLM (llama-cpp)...")
                 raw = self._call_local_gguf(full_prompt, max_tokens=180)
                 return raw, "local_neural_slm:medgemma-4b-it"
             has_cuda = _is_cuda_available()
@@ -571,21 +582,15 @@ class MedGemmaService:
                 logger.info("Executing turn via Local GPU PEFT pipeline (CUDA acceleration enabled)...")
                 raw = self._local_inference(full_prompt)
                 return raw, "peft_local_gpu:careflow-medgemma-final"
-            elif self.is_ollama_available():
-                model = settings.OLLAMA_MODEL if active_provider == "finetuned_medgemma" else getattr(settings, "BASE_OLLAMA_MODEL", "medgemma-4b-it")
-                logger.info(f"Executing turn via local Ollama daemon '{model}'...")
-                raw = self._call_ollama(full_prompt, model_name=model, max_tokens=120)
-                return raw, f"ollama:{model}"
+            elif getattr(settings, "ENABLE_MOCK_FALLBACK", True):
+                logger.info("Executing turn via Local Clinical Engine (fallback)...")
+                m_turn = self._mock_slm_triage_turn(
+                    conversation_history=[user_prompt],
+                    vitals={},
+                )
+                return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
             else:
-                if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
-                    logger.info("Executing turn via Local Clinical Engine (fallback)...")
-                    m_turn = self._mock_slm_triage_turn(
-                        conversation_history=[user_prompt],
-                        vitals={},
-                    )
-                    return json.dumps(m_turn), "local_cpu_engine:medgemma-4b"
-                else:
-                    raise ModelInferenceError("No local neural weights found and mock fallback is disabled.")
+                raise ModelInferenceError("No local neural model available (Ollama or GGUF) and mock fallback is disabled.")
 
         # 2. Check explicit External API override
         elif backend_mode == "external_api" or active_provider == "external_api":
@@ -601,7 +606,7 @@ class MedGemmaService:
 
         # 4. Default fallback
         else:
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
                 logger.info("Executing turn via Local Clinical Engine...")
                 m_turn = self._mock_slm_triage_turn(
                     conversation_history=[user_prompt],
@@ -725,7 +730,7 @@ class MedGemmaService:
             clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
         except Exception as err:
             logger.warning(f"Live SLM execution failed ({err}).")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
                 logger.info("Falling back to deterministic clinical SLM engine.")
                 clean_dict = self._mock_slm_triage_turn(
                     conversation_history,
@@ -787,14 +792,14 @@ class MedGemmaService:
         clean_dict["next_question_hi"] = q_hi_devanagari
 
         # Guard canned question overwrite behind ENABLE_MOCK_FALLBACK
-        if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+        if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
             clean_dict = self._sanitize_clinical_bilingual_questions(clean_dict, conversation_history)
 
         # Strict safety and guardrail check
         is_valid, safe_dict, violations = safety_service.validate_slm_triage_turn(clean_dict, conversation_history)
         if not is_valid:
             logger.warning(f"MedGemma output violated guardrails ({violations})")
-            if getattr(settings, "ENABLE_MOCK_FALLBACK", False):
+            if getattr(settings, "ENABLE_MOCK_FALLBACK", True):
                 clean_dict = self._mock_slm_triage_turn(
                     conversation_history,
                     vitals or {},
