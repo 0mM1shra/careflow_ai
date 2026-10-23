@@ -121,6 +121,24 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# Google Colab GPU Live Accelerator Quick Banner
+col_banner, col_btn = st.columns([3, 1])
+with col_banner:
+    st.markdown("""
+    <div style="background:#F0FDF4; border:1px solid #86EFAC; padding:12px 18px; border-radius:10px; color:#166534; font-size:13.5px;">
+        <strong>⚡ Live NVIDIA T4 GPU Acceleration:</strong> Run Google MedGemma 4B on a free Google Colab GPU and stream neural responses into CareFlow!
+    </div>
+    """, unsafe_allow_html=True)
+with col_btn:
+    st.link_button(
+        "🚀 Open in Colab",
+        "https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb",
+        type="primary",
+        use_container_width=True
+    )
+
+st.write("")
+
 # Sidebar System Health Status & Colab GPU Controls
 from frontend.sidebar import render_careflow_sidebar
 render_careflow_sidebar(current_page="home")

@@ -3,13 +3,15 @@ import streamlit as st
 import requests
 from frontend.api_client import api_client
 
+COLAB_NOTEBOOK_URL = "https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb"
+
 def render_careflow_sidebar(current_page: str = ""):
     """
-    Renders standardized hospital status, live Colab GPU connection widget,
-    and navigation across CareFlow portals.
+    Standardized CareFlow sidebar with direct 1-click Google Colab GPU notebook
+    launcher, live GPU connection manager, and portal navigation.
     """
     st.sidebar.markdown("""
-    <div style="background: linear-gradient(135deg, #0F766E 0%, #1E3A8A 100%); padding: 14px 16px; border-radius: 12px; color: white; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(15,118,110,0.2);">
+    <div style="background: linear-gradient(135deg, #0F766E 0%, #1E3A8A 100%); padding: 14px 16px; border-radius: 12px; color: white; margin-bottom: 14px; box-shadow: 0 4px 12px -2px rgba(15,118,110,0.25);">
         <div style="font-weight: 700; font-size: 17px; display: flex; align-items: center; gap: 8px;">
             🏥 CareFlow Health
         </div>
@@ -19,47 +21,38 @@ def render_careflow_sidebar(current_page: str = ""):
     </div>
     """, unsafe_allow_html=True)
 
-    # 1. System Health Status
-    health = api_client.get_health()
-    st.sidebar.markdown("##### ⚙️ System Status")
+    # 1. Direct 1-Click Launch into Google Colab GPU
+    st.sidebar.markdown("##### ⚡ Google MedGemma GPU Server")
+    st.sidebar.link_button(
+        "🚀 Open in Google Colab",
+        COLAB_NOTEBOOK_URL,
+        type="primary",
+        use_container_width=True,
+        help="Opens CareFlow_MedGemma_GPU_Colab.ipynb on Google Colab in a new tab"
+    )
 
-    backend_ok = health.get("status") == "healthy"
-    if backend_ok:
-        st.sidebar.success("🟢 Hospital Backend: **Online**")
-    else:
-        st.sidebar.error("🔴 Hospital Backend: **Offline / Reconnecting**")
-
-    # Check active MedGemma runtime
-    active_mode = health.get("medgemma_mode", "hosted")
-    colab_connected = st.session_state.get("colab_gpu_connected", False)
-    
-    # Check if active endpoint is configured
+    # 2. Connection Manager & Instructions
     active_endpoint = os.getenv("MEDGEMMA_ENDPOINT", "") or st.session_state.get("colab_endpoint", "")
-    
-    if colab_connected or active_mode == "hosted" or "trycloudflare" in active_endpoint:
-        gpu_name = st.session_state.get("colab_gpu_name", "NVIDIA Tesla T4")
-        st.sidebar.info(f"🚀 Neural SLM: **Colab GPU ({gpu_name})**")
-    else:
-        st.sidebar.info("🧠 Neural SLM: **Local / Clinical Engine**")
+    default_val = st.session_state.get(
+        "colab_endpoint",
+        active_endpoint or "https://refuse-overhead-efficiently-hoped.trycloudflare.com/v1/chat/completions"
+    )
 
-    st.sidebar.caption("🌳 Urgency Model: LightGBM (41 Clinical Features)")
-    st.sidebar.caption("🎙️ Voice Engine: Deepgram Nova-2 Medical STT")
-
-    # 2. Google Colab GPU Connection Expander
-    st.sidebar.divider()
-    with st.sidebar.expander("⚡ Google Colab GPU Server", expanded=False):
+    with st.sidebar.expander("🔗 Connect Colab GPU Tunnel", expanded=True):
         st.markdown(
-            "Run [`CareFlow_MedGemma_GPU_Colab.ipynb`](https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb) "
-            "on a free Google Colab T4 GPU and connect it directly below:"
+            """
+            <div style="font-size: 12px; color: #475569; line-height: 1.5; margin-bottom: 8px;">
+                <strong>Quick 3-Step Setup:</strong><br/>
+                1. Click <b>Open in Google Colab</b> above.<br/>
+                2. Press <code>Ctrl + F9</code> (Runtime &rarr; Run all).<br/>
+                3. Copy your <code>trycloudflare.com</code> URL and paste below:
+            </div>
+            """,
+            unsafe_allow_html=True
         )
-        
-        default_val = st.session_state.get(
-            "colab_endpoint",
-            active_endpoint or "https://refuse-overhead-efficiently-hoped.trycloudflare.com/v1/chat/completions"
-        )
-        
+
         user_url = st.text_input(
-            "Colab Tunnel URL:",
+            "Colab Cloudflare URL:",
             value=default_val,
             placeholder="https://xxxx.trycloudflare.com",
             key="colab_url_sidebar_input",
@@ -75,10 +68,9 @@ def render_careflow_sidebar(current_page: str = ""):
                         if not any(s in clean_url for s in ("/v1/chat/completions", "/api/medgemma/triage")):
                             clean_url = f"{clean_url.rstrip('/')}/v1/chat/completions"
                         
-                        # Ping health
                         base_h = clean_url.split("/v1/")[0]
                         try:
-                            h_resp = requests.get(f"{base_h}/health", timeout=6)
+                            h_resp = requests.get(f"{base_h}/health", timeout=8)
                             if h_resp.status_code == 200:
                                 h_data = h_resp.json()
                                 gpu = h_data.get("gpu", "Tesla T4")
@@ -89,7 +81,7 @@ def render_careflow_sidebar(current_page: str = ""):
                                 st.session_state["colab_endpoint"] = clean_url
                                 st.session_state["colab_gpu_connected"] = True
                                 st.session_state["colab_gpu_name"] = gpu
-                                st.success(f"Connected! {gpu} ({vram} GB VRAM)")
+                                st.success(f"✅ Connected! {gpu} ({vram} GB VRAM)")
                                 st.rerun()
                             else:
                                 st.error(f"Endpoint returned HTTP {h_resp.status_code}")
@@ -105,7 +97,31 @@ def render_careflow_sidebar(current_page: str = ""):
                 st.info("Switched to Local mode.")
                 st.rerun()
 
-    # 3. Navigation Links
+    # 3. System Status
+    st.sidebar.divider()
+    st.sidebar.markdown("##### ⚙️ System Status")
+
+    health = api_client.get_health()
+    backend_ok = health.get("status") == "healthy"
+    if backend_ok:
+        st.sidebar.success("🟢 Hospital Backend: **Online**")
+    else:
+        st.sidebar.error("🔴 Hospital Backend: **Offline / Reconnecting**")
+
+    # Check active MedGemma runtime
+    active_mode = health.get("medgemma_mode", "hosted")
+    colab_connected = st.session_state.get("colab_gpu_connected", False)
+
+    if colab_connected or active_mode == "hosted" or "trycloudflare" in active_endpoint:
+        gpu_name = st.session_state.get("colab_gpu_name", "NVIDIA Tesla T4")
+        st.sidebar.info(f"🚀 Neural SLM: **Colab GPU ({gpu_name})**")
+    else:
+        st.sidebar.info("🧠 Neural SLM: **Local / Clinical Engine**")
+
+    st.sidebar.caption("🌳 Urgency Model: LightGBM (41 Clinical Features)")
+    st.sidebar.caption("🎙️ Voice Engine: Deepgram Nova-2 Medical STT")
+
+    # 4. Navigation Links
     st.sidebar.divider()
     st.sidebar.markdown("##### 🧭 Navigation")
     if current_page != "home":
