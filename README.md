@@ -1,6 +1,7 @@
 # CareFlow AI: MedGemma-Powered Multimodal Clinical Intake & Dual-Triage System
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://careflow-ai-d.streamlit.app/)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-0mM1shra%2Fcareflow__ai-181717?style=for-the-badge&logo=github)](https://github.com/0mM1shra/careflow_ai)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -9,6 +10,7 @@
 [![LightGBM](https://img.shields.io/badge/LightGBM-41_Feature_Urgency_Model-2E7D32?style=for-the-badge)](https://lightgbm.readthedocs.io/)
 
 > 🌐 **Live Cloud Demo**: **[https://careflow-ai-d.streamlit.app/](https://careflow-ai-d.streamlit.app/)**  
+> ⚡ **Live GPU Colab Notebook**: **[CareFlow_MedGemma_GPU_Colab.ipynb](https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb)**  
 > 🔑 **Clinician Reviewer PIN**: `CAREFLOW`  
 > 💻 **GitHub Repository**: **[https://github.com/0mM1shra/careflow_ai](https://github.com/0mM1shra/careflow_ai)**
 
@@ -316,14 +318,22 @@ CareFlow supports three model modes configured via `MEDGEMMA_MODE` in `.env`:
   MEDGEMMA_LOCAL_GGUF_PATH=models/medgemma-4b-it-Q4_K_M.gguf
   ```
 
-#### Option C: Free Google Colab T4 GPU Hosting (`MEDGEMMA_MODE=hosted`)
-- Open the included Jupyter Notebook [`CareFlow_MedGemma_GPU_Colab.ipynb`](CareFlow_MedGemma_GPU_Colab.ipynb) on [Google Colab](https://colab.research.google.com/).
-- Run the notebook with a free T4 GPU to expose a vLLM / ngrok endpoint.
-- Paste your ngrok URL into `.env`:
-  ```ini
-  MEDGEMMA_MODE=hosted
-  MEDGEMMA_ENDPOINT=https://your-colab-ngrok-url/v1/chat/completions
-  ```
+#### Option C: Free Google Colab NVIDIA T4 GPU Server (`MEDGEMMA_MODE=hosted`) — *Live GPU Inference (Zero Local Hardware)*
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/0mM1shra/careflow_ai/blob/main/CareFlow_MedGemma_GPU_Colab.ipynb)
+
+- **100% Free Live GPU Microservice**: If your PC lacks a dedicated NVIDIA GPU, you can run Google MedGemma 4B with our fine-tuned LoRA adapter on a free Google Colab T4 GPU.
+- **Zero Account or Token Setup**: Uses Cloudflare Quick Tunnels — no ngrok tokens, no credit cards, and no paid subscriptions required.
+- **How to Run**:
+  1. Click the **Open In Colab** badge above (or open [`CareFlow_MedGemma_GPU_Colab.ipynb`](CareFlow_MedGemma_GPU_Colab.ipynb) in [Google Colab](https://colab.research.google.com/)).
+  2. In Google Colab top menu: **Runtime** → **Change runtime type** → select **T4 GPU** → **Save**.
+  3. Click **Runtime** → **Run all** (`Ctrl + F9`). Takes ~90 seconds to load the model in 4-bit into GPU VRAM.
+  4. Cell 5 will print your live HTTPS endpoint (e.g. `https://xxxx.trycloudflare.com/v1/chat/completions`).
+  5. In your local CareFlow `.env` file, paste:
+     ```ini
+     MEDGEMMA_MODE=hosted
+     MEDGEMMA_ENDPOINT=https://your-tunnel-name.trycloudflare.com/v1/chat/completions
+     ```
+  6. Run CareFlow locally — all clinical patient turns will now execute directly on the live Colab T4 GPU with sub-2-second latency!
 
 ---
 

@@ -73,11 +73,19 @@ class MedGemmaService:
     def mode(self, val: str):
         settings.MEDGEMMA_MODE = val
 
+    @property
+    def endpoint(self) -> str:
+        return self._endpoint_override if self._endpoint_override is not None else getattr(settings, "MEDGEMMA_ENDPOINT", "")
+
+    @endpoint.setter
+    def endpoint(self, val: str):
+        self._endpoint_override = val
+
     def __init__(self):
+        self._endpoint_override = None
         self.model_id = settings.MEDGEMMA_MODEL_ID
         self.base_model_id = getattr(settings, "MEDGEMMA_BASE_MODEL_ID", "unsloth/medgemma-4b-it-unsloth-bnb-4bit")
         self.adapter_path = Path(getattr(settings, "MEDGEMMA_ADAPTER_PATH", "careflow-medgemma-final"))
-        self.endpoint = settings.MEDGEMMA_ENDPOINT
         self.api_key = settings.MEDGEMMA_API_KEY
         self.local_quantization = settings.MEDGEMMA_LOCAL_QUANTIZATION
         self._local_pipeline = None
@@ -188,8 +196,9 @@ class MedGemmaService:
         ollama_ok = self.is_ollama_available()
         has_gguf = self.has_local_gguf()
         is_local = self.mode in ("mock", "local")
-        std_ready = True if (is_local or has_gguf) else bool(self.endpoint)
-        ft_ready = True if (is_local or has_gguf) else (ollama_ok or self.has_adapter)
+        has_hosted = (self.mode == "hosted" and bool(self.endpoint))
+        std_ready = True if (is_local or has_gguf or has_hosted) else bool(self.endpoint)
+        ft_ready = True if (is_local or has_gguf or has_hosted) else (ollama_ok or self.has_adapter)
 
         return {
             "standard_medgemma": {
@@ -197,16 +206,16 @@ class MedGemmaService:
                 "name": "Google MedGemma (Standard Instruction-Tuned)",
                 "model_id": settings.STANDARD_MEDGEMMA_MODEL_ID,
                 "is_available": std_ready,
-                "endpoint_type": "local_neural_slm:medgemma-4b" if has_gguf else ("local_cpu_engine" if (is_local and not has_cuda) else ("peft_local_gpu" if has_cuda else ("remote_hosted_api" if self.endpoint else "local_clinical_engine"))),
+                "endpoint_type": "colab_gpu_hosted" if has_hosted else ("local_neural_slm:medgemma-4b" if has_gguf else ("local_cpu_engine" if (is_local and not has_cuda) else ("peft_local_gpu" if has_cuda else ("remote_hosted_api" if self.endpoint else "local_clinical_engine")))),
                 "has_endpoint": bool(self.endpoint),
-                "requires_api_key": False if is_local else bool(self.endpoint and not self.api_key),
+                "requires_api_key": False if (is_local or has_hosted) else bool(self.endpoint and not self.api_key),
             },
             "finetuned_medgemma": {
                 "provider_id": "finetuned_medgemma",
                 "name": "CareFlow Fine-Tuned MedGemma 4B (careflow-medgemma-final)",
                 "model_id": f"ollama:{settings.OLLAMA_MODEL}" if ollama_ok else "careflow-medgemma-final",
                 "is_available": ft_ready,
-                "runtime": "local_neural_slm:medgemma-4b" if has_gguf else ("ollama_local_gpu" if ollama_ok else ("peft_local_gpu" if (self.has_adapter and has_cuda) else "local_cpu_engine")),
+                "runtime": "colab_gpu_hosted:medgemma-4b" if has_hosted else ("local_neural_slm:medgemma-4b" if has_gguf else ("ollama_local_gpu" if ollama_ok else ("peft_local_gpu" if (self.has_adapter and has_cuda) else "local_cpu_engine"))),
                 "ollama_endpoint": settings.OLLAMA_BASE_URL,
                 "ollama_model": settings.OLLAMA_MODEL,
                 "has_ollama": ollama_ok,
@@ -560,8 +569,14 @@ class MedGemmaService:
         active_provider = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
         has_hosted_creds = bool(self.endpoint or self.api_key or os.getenv("HF_TOKEN"))
 
-        # 1. Local Mode First (Zero Cloud Overhead, Auto-detects GPU)
-        if self.mode in ("local", "mock") or backend_mode == "local":
+        # 1. Hosted MedGemma API / Colab GPU Server (prioritized when in hosted mode with endpoint)
+        if self.mode == "hosted" and self.endpoint:
+            logger.info(f"Executing turn via Hosted MedGemma GPU endpoint ({self.endpoint})...")
+            raw = self._hosted_inference(full_prompt)
+            return raw, f"hosted_gpu:{self.model_id or 'medgemma-4b'}"
+
+        # 2. Local Mode First (Zero Cloud Overhead, Auto-detects GPU)
+        elif self.mode in ("local", "mock") or backend_mode == "local":
             if self.has_local_gguf():
                 logger.info("Executing turn via Local Neural MedGemma 4B SLM (llama-cpp CPU/GPU-ready)...")
                 raw = self._call_local_gguf(full_prompt, max_tokens=180)
@@ -587,17 +602,11 @@ class MedGemmaService:
                 else:
                     raise ModelInferenceError("No local neural weights found and mock fallback is disabled.")
 
-        # 2. Check explicit External API override
+        # 3. Check explicit External API override
         elif backend_mode == "external_api" or active_provider == "external_api":
             logger.info(f"Executing turn via External API ({settings.EXTERNAL_API_MODEL})...")
             raw = self._call_external_api(system_prompt, user_prompt)
             return raw, f"external_api:{settings.EXTERNAL_API_MODEL}"
-
-        # 3. Hosted MedGemma API (when explicitly in hosted mode with endpoint)
-        elif self.mode == "hosted" and self.endpoint:
-            logger.info(f"Executing turn via hosted MedGemma endpoint ({self.endpoint})...")
-            raw = self._hosted_inference(full_prompt)
-            return raw, f"hosted:{self.model_id}"
 
         # 4. Default fallback
         else:
@@ -683,9 +692,10 @@ class MedGemmaService:
         Outputs strict, validated JSON matching the 6-field contract with zero mock fallbacks.
         """
         has_cuda = _is_cuda_available()
-        has_neural_model = self.has_local_gguf() or self.is_ollama_available() or (self.has_adapter and has_cuda)
+        is_hosted_ready = (self.mode == "hosted" and bool(self.endpoint))
+        has_neural_model = is_hosted_ready or self.has_local_gguf() or self.is_ollama_available() or (self.has_adapter and has_cuda)
 
-        # Only use mock if mode is explicitly 'mock' or if mock fallback is enabled AND no neural model is ready
+        # Only use mock if mode is explicitly 'mock' or if mock fallback is enabled AND no neural model or hosted endpoint is ready
         if self.mode == "mock" or (not has_neural_model and getattr(settings, "ENABLE_MOCK_FALLBACK", False)):
             m_turn = self._mock_slm_triage_turn(
                 conversation_history,
@@ -1334,9 +1344,13 @@ class MedGemmaService:
         }
 
     def _hosted_inference(self, prompt: str) -> str:
-        """Calls a user-configured Hugging Face or TGI/vLLM inference endpoint."""
+        """Calls a user-configured Hugging Face, Colab GPU, or TGI/vLLM inference endpoint."""
         target_endpoint = self.endpoint.strip() if self.endpoint else f"https://router.huggingface.co/hf-inference/models/{self.model_id}"
         api_token = self.api_key or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("OPENAI_API_KEY", "")
+
+        # Auto-normalize Cloudflare / Colab tunnels: if user entered base URL without endpoint path, append /v1/chat/completions
+        if ("trycloudflare.com" in target_endpoint or "ngrok" in target_endpoint or "loca.lt" in target_endpoint) and not any(suffix in target_endpoint for suffix in ("/v1/chat/completions", "/api/medgemma/triage", "/generate")):
+            target_endpoint = f"{target_endpoint.rstrip('/')}/v1/chat/completions"
 
         if "huggingface.co" in target_endpoint and not api_token:
             raise ModelInferenceError(
@@ -1348,7 +1362,7 @@ class MedGemmaService:
         if api_token:
             headers["Authorization"] = f"Bearer {api_token.strip()}"
 
-        is_openai_style = "chat/completions" in (self.endpoint or "") or "v1" in (self.endpoint or "")
+        is_openai_style = "chat/completions" in target_endpoint or "v1" in target_endpoint
         if is_openai_style:
             payload = {
                 "model": self.model_id or "google/medgemma-1.5-4b-it",
@@ -1416,7 +1430,6 @@ class MedGemmaService:
                     return choice["text"]
                 return json.dumps(choice)
             else:
-                return json.dumps(data)
                 return json.dumps(data)
         except requests.Timeout:
             raise ModelInferenceError(f"Hosted MedGemma endpoint timed out after {timeout} seconds.")
