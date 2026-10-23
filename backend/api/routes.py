@@ -1,3 +1,4 @@
+from backend.services.safety import mask_patient_pii
 import os
 import uuid
 
@@ -158,10 +159,11 @@ def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
 
     init_uncertainties = []
 
-    if req.chief_complaint and req.chief_complaint.strip():
+    masked_complaint = mask_patient_pii(req.chief_complaint.strip()) if req.chief_complaint and req.chief_complaint.strip() else ""
+    if masked_complaint:
         initial_triage = triage_engine.evaluate(
-            evidence_state={"facts": {"chief_complaint": req.chief_complaint.strip()}},
-            raw_messages=[req.chief_complaint.strip()],
+            evidence_state={"facts": {"chief_complaint": masked_complaint}},
+            raw_messages=[masked_complaint],
             ai_status="ready"
         )
         init_priority = initial_triage.priority_category
@@ -688,15 +690,15 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
 
 
-    content_clean = req.content.strip() if req.content else ""
+    content_clean = mask_patient_pii(req.content.strip()) if req.content else ""
 
     if not content_clean:
 
         raise HTTPException(status_code=400, detail="Message content cannot be empty or whitespace only.")
 
+    raw_trans_clean = mask_patient_pii(req.raw_transcript) if req.raw_transcript else None
 
-
-    # Store verbatim message in SQLite with modality provenance
+    # Store message in SQLite with PII redacted and modality provenance
 
     msg = Message(
 
@@ -706,7 +708,7 @@ def add_patient_message(case_id: str, req: MessageCreateRequest, db: Session = D
 
         content=content_clean,
 
-        raw_transcript=req.raw_transcript,
+        raw_transcript=raw_trans_clean,
 
         source_type=req.source_type or "patient_typed",
 
@@ -928,7 +930,7 @@ async def upload_medical_document(
 
     ocr_res = ocr_service.extract_with_metadata(file_bytes, file.filename)
 
-    extracted_text = ocr_res.extracted_text
+    extracted_text = mask_patient_pii(ocr_res.extracted_text)
 
     formatted_content = f"[Uploaded Medical Document ({file.filename}) OCR]:\n{extracted_text}"
 
@@ -1006,19 +1008,19 @@ async def upload_medical_document(
     # Ingest document text into persistent clinical evidence
     current_evidence["extracted_report"] = formatted_content
 
-    # Ingest continuous vitals from OCR text if present (lab reports, monitors, discharge notes)
+    # Ingest continuous vitals from OCR text ONLY if explicitly present (do not inject default fake vitals)
     try:
-        from backend.ml_triage_service import extract_vitals_from_dict_or_text, DEFAULT_VITALS
-        doc_vitals = extract_vitals_from_dict_or_text(text_content=extracted_text)
+        from backend.ml_triage_service import extract_vitals_with_metadata
+        raw_v, imputed = extract_vitals_with_metadata(text_content=extracted_text)
+        genuinely_extracted = {k: v for k, v in raw_v.items() if k not in imputed}
         if getattr(ocr_res, "extracted_vitals", None):
-            doc_vitals.update(ocr_res.extracted_vitals)
-        ev_vitals = current_evidence.get("vitals", {})
-        for vk, vv in doc_vitals.items():
-            if vv != DEFAULT_VITALS.get(vk):
-                ev_vitals[vk] = vv
-            elif vk not in ev_vitals:
-                ev_vitals[vk] = vv
-        current_evidence["vitals"] = ev_vitals
+            genuinely_extracted.update(ocr_res.extracted_vitals)
+        ev_vitals = current_evidence.get("vitals", {}) or {}
+        ev_vitals.update(genuinely_extracted)
+        if ev_vitals:
+            current_evidence["vitals"] = ev_vitals
+        else:
+            current_evidence.pop("vitals", None)
     except Exception as v_err:
         logger.warning(f"Failed to ingest vitals from OCR text: {v_err}")
 

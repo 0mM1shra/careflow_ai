@@ -191,8 +191,8 @@ class DeterministicTriageEngine:
         # 2. Call trained LightGBM urgency model
         ml_model_triage = None
         model_status = "available"
+        slm_features = evidence_state.get("slm_extraction") or evidence_state
         try:
-            slm_features = evidence_state.get("slm_extraction") or evidence_state
             ml_details = predict_urgency_lgbm_with_details(slm_features, parsed_vitals)
             ml_model_triage = ml_details.get("predicted_tier")
             model_status = ml_details.get("model_status", "available")
@@ -202,16 +202,18 @@ class DeterministicTriageEngine:
             model_status = "error"
             ml_model_triage = None
 
-        # 3. Deterministic Safety Gate Decision Layer with Strict P0 Guardrails
-        # A final priority of P0 MUST be backed by either:
-        # a) An explicit deterministic trigger (e.g., SpO2 < 92, SBP < 90, P0 rule trigger), OR
-        # b) LightGBM P0 prediction WITH an active red-flag (pain_severe=1 or onset_acute=1).
-        # If Rule-Based triage evaluates to P3 (Routine) and NO red flags exist, suppress LightGBM P0 spike and cap at P3.
-
+        # 3. Deterministic Safety Gate Decision Layer with Strict Guardrails
         feat_vec = ml_details.get("feature_vector", {}) if isinstance(ml_details, dict) else {}
         pain_severe = int(feat_vec.get("pain_severe", 0) or 0)
         onset_acute = int(feat_vec.get("onset_acute", 0) or 0)
         has_active_red_flag = bool(pain_severe == 1 or onset_acute == 1)
+
+        # Normal Report Guardrail: Check if an uploaded scan is explicitly normal
+        extracted_rep = evidence_state.get("extracted_report", "")
+        is_normal_scan = False
+        if extracted_rep:
+            from backend.services.ocr_service import ocr_service
+            is_normal_scan = ocr_service.is_normal_study(extracted_rep)
 
         has_deterministic_p0 = bool(rule_based_triage == "P0" or any(tr.priority == "P0" for tr in rule_result.triggered_rules))
         if parsed_vitals.get("spo2_pct") is not None and float(parsed_vitals.get("spo2_pct", 98)) < 92.0:
@@ -263,6 +265,11 @@ class DeterministicTriageEngine:
                         final_triage = rule_based_triage
                         escalation_applied = False
                         escalation_reason = f"ML P1 modulated to {final_triage} due to absent red flags in routine complaint."
+                elif is_normal_scan and not has_active_red_flag and rule_based_triage == "P3":
+                    # Normal Scan Guardrail: suppress P2 escalation when scan is confirmed normal
+                    final_triage = "P3"
+                    escalation_applied = False
+                    escalation_reason = "Normal Scan Guardrail: Uploaded imaging scan confirms normal/unremarkable findings with no acute clinical red flags; capped at P3."
                 elif ml_model_triage != rule_based_triage:
                     final_triage = ml_model_triage
                     escalation_applied = True
@@ -275,6 +282,14 @@ class DeterministicTriageEngine:
                 final_triage = rule_based_triage
                 escalation_applied = True
                 escalation_reason = "Model unavailable fallback: Assigned via deterministic clinical protocol due to ML classifier unavailability."
+
+        # 4. SLM <-> LightGBM Consensus Sync (Requirement 4)
+        # If SLM clinical assessment determines P1 (Urgent), do NOT let LightGBM downgrade final priority to P3!
+        slm_boundary = slm_features.get("target_triage_boundary") if isinstance(slm_features, dict) else None
+        if slm_boundary == "P1" and final_triage in ("P2", "P3"):
+            final_triage = "P1"
+            escalation_applied = True
+            escalation_reason = "Consensus Guardrail: MedGemma SLM evaluated P1 (Urgent) based on clinical report & dialogue context; higher acuity prioritized."
 
         rule_result.priority_category = final_triage
         rule_result.final_triage = final_triage

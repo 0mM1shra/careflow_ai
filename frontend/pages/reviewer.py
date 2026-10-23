@@ -159,8 +159,8 @@ def render_lgbm_badge(priority: str) -> str:
     return f'<span style="background-color: {bg}; color: {fg}; border: 1.5px solid {border}; padding: 3px 8px; border-radius: 12px; font-weight: 700; font-size: 12px; display: inline-block;">🌳 LightGBM: {p}</span>'
 
 def parse_vitals_from_case(case_data: dict):
-    """Extracts continuous vitals with physiological reference checking."""
-    evidence_st = case_data.get("evidence_state", {})
+    """Extracts continuous vitals with physiological reference checking. Returns (formatted_str, is_abnormal) or (None, False) if not provided."""
+    evidence_st = case_data.get("evidence_state", {}) or {}
     v_dict = evidence_st.get("vitals", {}) or {}
     
     # Also scan patient messages for unrecorded vitals
@@ -170,10 +170,10 @@ def parse_vitals_from_case(case_data: dict):
     hr_val = v_dict.get("heart_rate") or v_dict.get("hr")
     if hr_val is None:
         m = re.search(r"\b(?:hr|pulse|heart\s*rate)[:\s]*(\d{2,3})\b", msgs, re.IGNORECASE)
-        hr_val = float(m.group(1)) if m else 76.0
+        hr_val = float(m.group(1)) if m else None
     else:
         hr_val = float(hr_val)
-    hr_abnormal = (hr_val < 50 or hr_val > 100)
+    hr_abnormal = bool(hr_val is not None and (hr_val < 50 or hr_val > 100))
 
     # 2. Blood Pressure
     sys_val = v_dict.get("sys_bp") or v_dict.get("systolic_bp")
@@ -184,37 +184,64 @@ def parse_vitals_from_case(case_data: dict):
             sys_val = float(m.group(1))
             dia_val = float(m.group(2))
         else:
-            sys_val = float(sys_val) if sys_val is not None else 122.0
-            dia_val = float(dia_val) if dia_val is not None else 78.0
+            sys_val = None
+            dia_val = None
     else:
         sys_val = float(sys_val)
         dia_val = float(dia_val)
-    bp_abnormal = (sys_val < 90 or sys_val > 140 or dia_val > 90 or dia_val < 60)
+    bp_abnormal = bool(sys_val is not None and dia_val is not None and (sys_val < 90 or sys_val > 140 or dia_val > 90 or dia_val < 60))
 
     # 3. SpO2
     spo2_val = v_dict.get("spo2_pct") or v_dict.get("spo2")
     if spo2_val is None:
         m = re.search(r"\b(?:spo2|o2|sat|saturation)[:\s]*(\d{2,3})%?\b", msgs, re.IGNORECASE)
-        spo2_val = float(m.group(1)) if m else 98.0
+        spo2_val = float(m.group(1)) if m else None
     else:
         spo2_val = float(spo2_val)
-    spo2_abnormal = (spo2_val < 95.0)
+    spo2_abnormal = bool(spo2_val is not None and spo2_val < 95.0)
 
     # 4. Lactate
     lac_val = v_dict.get("poc_lactate") or v_dict.get("lactate")
     if lac_val is None:
         m = re.search(r"\b(?:lactate|poc_lactate)[:\s]*([0-9.]+)\b", msgs, re.IGNORECASE)
-        lac_val = float(m.group(1)) if m else 1.2
+        lac_val = float(m.group(1)) if m else None
     else:
         lac_val = float(lac_val)
-    lac_abnormal = (lac_val > 2.0)
+    lac_abnormal = bool(lac_val is not None and lac_val > 2.0)
 
     return {
-        "hr": (int(hr_val), hr_abnormal),
-        "bp": (f"{int(sys_val)}/{int(dia_val)}", bp_abnormal),
-        "spo2": (f"{int(spo2_val)}%", spo2_abnormal),
-        "lactate": (f"{lac_val:.1f}", lac_abnormal)
+        "hr": (f"{int(hr_val)} bpm" if hr_val is not None else None, hr_abnormal),
+        "bp": (f"{int(sys_val)}/{int(dia_val)} mmHg" if (sys_val is not None and dia_val is not None) else None, bp_abnormal),
+        "spo2": (f"{int(spo2_val)}%" if spo2_val is not None else None, spo2_abnormal),
+        "lactate": (f"{lac_val:.1f} mmol/L" if lac_val is not None else None, lac_abnormal)
     }
+
+
+# Reviewer Showcase Authentication Gate (Showcase Demo Mode — PIN 1234)
+if "reviewer_authenticated" not in st.session_state:
+    st.session_state.reviewer_authenticated = False
+
+if not st.session_state.reviewer_authenticated:
+    st.markdown('''
+    <div style="max-width:440px; margin: 40px auto; padding: 24px; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.06); text-align:center;">
+        <div style="font-size:36px; margin-bottom:12px;">🔒</div>
+        <div style="font-size:20px; font-weight:700; color:#0F172A; margin-bottom:6px;">Clinician Reviewer Access</div>
+        <div style="font-size:13px; color:#64748B; margin-bottom:16px;">Showcase Demo Mode — Authorized Clinical Staff Only</div>
+        <div style="display:inline-block; background:#EFF6FF; border:1px solid #BFDBFE; color:#1E40AF; padding:4px 12px; border-radius:16px; font-size:12px; font-weight:600; margin-bottom:18px;">
+            Showcase Demo PIN: <strong>1234</strong>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+    col_l1, col_l2, col_l3 = st.columns([1, 1.2, 1])
+    with col_l2:
+        pin = st.text_input("Enter Clinician PIN", type="password", key="reviewer_auth_pin", placeholder="Enter 1234")
+        if st.button("Unlock Reviewer Dashboard 🔓", type="primary", use_container_width=True):
+            if pin.strip() == "1234":
+                st.session_state.reviewer_authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid passcode. Use showcase PIN: 1234.")
+    st.stop()
 
 # App Header
 st.markdown("""
@@ -242,8 +269,14 @@ if "selected_case_id" not in st.session_state:
 with st.sidebar:
     st.markdown("### 🏥 Patient Queue")
     
-    if st.button("🩺 Switch to Patient Intake", use_container_width=True, help="Switch to patient intake"):
-        st.switch_page("pages/patient.py")
+    col_s1, col_s2 = st.columns([1.5, 1])
+    with col_s1:
+        if st.button("🩺 Patient Intake", use_container_width=True, help="Switch to patient intake"):
+            st.switch_page("pages/patient.py")
+    with col_s2:
+        if st.button("🔒 Logout", use_container_width=True, help="Lock dashboard"):
+            st.session_state.reviewer_authenticated = False
+            st.rerun()
 
     st.divider()
     
@@ -500,52 +533,76 @@ else:
 
         with v_col1:
             hr_val, hr_abn = vitals_data["hr"]
-            card_cls = "vital-card-abnormal" if hr_abn else "vital-card-normal"
-            tag_color = "#DC2626" if hr_abn else "#0F172A"
-            flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Abnormal Tachy/Brady</div>' if hr_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (60-100)</div>'
+            if hr_val is None:
+                card_cls = "vital-card-neutral"
+                val_html = '<div style="font-size:18px; font-weight:700; color:#64748B; margin:8px 0;">Not Provided</div>'
+                flag_html = '<div style="color:#94A3B8; font-size:11px; font-weight:600; margin-top:2px;">Not Recorded</div>'
+            else:
+                card_cls = "vital-card-abnormal" if hr_abn else "vital-card-normal"
+                tag_color = "#DC2626" if hr_abn else "#0F172A"
+                val_html = f'<div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{hr_val}</div>'
+                flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Abnormal Tachy/Brady</div>' if hr_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (60-100)</div>'
             st.markdown(f"""
             <div class="{card_cls}">
                 <div style="font-size:11.5px; font-weight:700; text-transform:uppercase; color:#64748B;">Heart Rate</div>
-                <div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{hr_val} <span style="font-size:14px; font-weight:500;">bpm</span></div>
+                {val_html}
                 {flag_html}
             </div>
             """, unsafe_allow_html=True)
 
         with v_col2:
             bp_val, bp_abn = vitals_data["bp"]
-            card_cls = "vital-card-abnormal" if bp_abn else "vital-card-normal"
-            tag_color = "#DC2626" if bp_abn else "#0F172A"
-            flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Abnormal Pressure</div>' if bp_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (90-130 / 60-85)</div>'
+            if bp_val is None:
+                card_cls = "vital-card-neutral"
+                val_html = '<div style="font-size:18px; font-weight:700; color:#64748B; margin:8px 0;">Not Provided</div>'
+                flag_html = '<div style="color:#94A3B8; font-size:11px; font-weight:600; margin-top:2px;">Not Recorded</div>'
+            else:
+                card_cls = "vital-card-abnormal" if bp_abn else "vital-card-normal"
+                tag_color = "#DC2626" if bp_abn else "#0F172A"
+                val_html = f'<div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{bp_val}</div>'
+                flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Abnormal Pressure</div>' if bp_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (90-130 / 60-85)</div>'
             st.markdown(f"""
             <div class="{card_cls}">
                 <div style="font-size:11.5px; font-weight:700; text-transform:uppercase; color:#64748B;">Blood Pressure</div>
-                <div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{bp_val} <span style="font-size:13px; font-weight:500;">mmHg</span></div>
+                {val_html}
                 {flag_html}
             </div>
             """, unsafe_allow_html=True)
 
         with v_col3:
             spo2_val, spo2_abn = vitals_data["spo2"]
-            card_cls = "vital-card-abnormal" if spo2_abn else "vital-card-normal"
-            tag_color = "#DC2626" if spo2_abn else "#0F172A"
-            flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Hypoxia (&lt;95%)</div>' if spo2_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (&ge;95%)</div>'
+            if spo2_val is None:
+                card_cls = "vital-card-neutral"
+                val_html = '<div style="font-size:18px; font-weight:700; color:#64748B; margin:8px 0;">Not Provided</div>'
+                flag_html = '<div style="color:#94A3B8; font-size:11px; font-weight:600; margin-top:2px;">Not Recorded</div>'
+            else:
+                card_cls = "vital-card-abnormal" if spo2_abn else "vital-card-normal"
+                tag_color = "#DC2626" if spo2_abn else "#0F172A"
+                val_html = f'<div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{spo2_val}</div>'
+                flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Hypoxia (&lt;95%)</div>' if spo2_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (&ge;95%)</div>'
             st.markdown(f"""
             <div class="{card_cls}">
                 <div style="font-size:11.5px; font-weight:700; text-transform:uppercase; color:#64748B;">Oxygen Saturation</div>
-                <div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{spo2_val}</div>
+                {val_html}
                 {flag_html}
             </div>
             """, unsafe_allow_html=True)
 
         with v_col4:
             lac_val, lac_abn = vitals_data["lactate"]
-            card_cls = "vital-card-abnormal" if lac_abn else "vital-card-normal"
-            tag_color = "#DC2626" if lac_abn else "#0F172A"
-            flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Hyperlactatemia (&gt;2.0)</div>' if lac_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (&le;2.0 mmol/L)</div>'
+            if lac_val is None:
+                card_cls = "vital-card-neutral"
+                val_html = '<div style="font-size:18px; font-weight:700; color:#64748B; margin:8px 0;">Not Provided</div>'
+                flag_html = '<div style="color:#94A3B8; font-size:11px; font-weight:600; margin-top:2px;">Not Recorded</div>'
+            else:
+                card_cls = "vital-card-abnormal" if lac_abn else "vital-card-normal"
+                tag_color = "#DC2626" if lac_abn else "#0F172A"
+                val_html = f'<div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{lac_val}</div>'
+                flag_html = '<div style="color:#DC2626; font-size:11px; font-weight:700; margin-top:2px;">⚠️ Hyperlactatemia (&gt;2.0)</div>' if lac_abn else '<div style="color:#16A34A; font-size:11px; font-weight:600; margin-top:2px;">Normal (&le;2.0 mmol/L)</div>'
             st.markdown(f"""
             <div class="{card_cls}">
                 <div style="font-size:11.5px; font-weight:700; text-transform:uppercase; color:#64748B;">POC Lactate</div>
-                <div style="font-size:26px; font-weight:800; color:{tag_color}; margin:4px 0;">{lac_val} <span style="font-size:13px; font-weight:500;">mmol/L</span></div>
+                {val_html}
                 {flag_html}
             </div>
             """, unsafe_allow_html=True)

@@ -139,7 +139,7 @@ else:
 st.sidebar.divider()
 st.sidebar.subheader("Navigation")
 st.sidebar.page_link("pages/patient.py", label="Patient Intake Portal", icon="🩺")
-st.sidebar.page_link("pages/model_showcase.py", label="Model Inference & Architecture", icon="🧠")
+st.sidebar.page_link("pages/reviewer.py", label="Clinician Reviewer Portal", icon="📋")
 
 # Role-Based Portals
 col_patient, col_reviewer = st.columns(2)

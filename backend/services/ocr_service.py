@@ -43,13 +43,22 @@ class MedicalDocumentOCRService:
         vital_markers = ["heart rate", "pulse", "bp", "blood pressure", "spo2", "temp", "temperature", "systolic", "diastolic", "bpm", "mmhg"]
         rx_markers = ["rx", "prescription", "capsule", "tablet", "syrup", "dosage", "sig:", "mg", "dr.", "doctor", "clinic", "hospital", "dispense"]
 
+        imaging_markers = [
+            "mri", "ct scan", "computed tomography", "x-ray", "radiograph", "ultrasound", "sonography",
+            "brain", "scan", "imaging", "contrast", "radiology", "impression", "opinion", "signal",
+            "ventricle", "midline", "sulci", "gyri", "parenchyma", "cerebral", "cerebellar"
+        ]
+
         lab_matches = sum(1 for m in lab_markers if m in t_low)
         vital_matches = sum(1 for m in vital_markers if m in t_low)
         rx_matches = sum(1 for m in rx_markers if m in t_low)
+        imaging_matches = sum(1 for m in imaging_markers if m in t_low)
 
-        score = lab_matches + vital_matches + rx_matches
+        score = lab_matches + vital_matches + rx_matches + imaging_matches
 
-        if lab_matches >= 2:
+        if imaging_matches >= 2:
+            doc_type = "imaging_or_radiology_report"
+        elif lab_matches >= 2:
             doc_type = "laboratory_report"
         elif rx_matches >= 2:
             doc_type = "prescription_or_clinical_notes"
@@ -59,6 +68,34 @@ class MedicalDocumentOCRService:
         is_medical = score >= 2
         confidence = min(round(0.4 + (score * 0.1), 2), 0.98) if is_medical else 0.2
         return is_medical, confidence, doc_type
+
+    @classmethod
+    def is_normal_study(cls, text: str) -> bool:
+        """
+        Determines if a diagnostic scan or medical report has explicitly normal/unremarkable findings.
+        """
+        if not text:
+            return False
+        t_low = text.lower()
+        normal_patterns = [
+            r"(?:opinion|impression|conclusion|diagnosis)\s*[:\-]?\s*(?:normal|unremarkable|within normal limits|no significant abnormality|negative)",
+            r"normal\s+(?:non\s*contrast\s*)?(?:mri|ct|study|scan|radiograph|examination)",
+            r"(?:study|scan|examination)\s+is\s+(?:within\s+normal\s+limits|normal|unremarkable)",
+            r"no\s+(?:signal\s+)?abnormality",
+            r"no\s+shift\s+of\s+midline\s+structures",
+        ]
+        return any(re.search(pat, t_low) for pat in normal_patterns)
+
+    @classmethod
+    def is_finding_negated(cls, finding: str, text: str) -> bool:
+        """
+        Checks if a medical finding or red-flag term is preceded by negation phrases
+        (e.g., 'no', 'normal', 'unremarkable', 'within normal limits', 'negative for').
+        """
+        if not text or not finding:
+            return False
+        pattern = rf"(?:no\s+|normal\s+|unremarkable\s+|within\s+normal\s+limits\s+|negative\s+for\s+|without\s+)(?:\w+\s+){{0,3}}{re.escape(finding.lower())}"
+        return bool(re.search(pattern, text.lower()))
 
     @classmethod
     def extract_structured_medical_facts(cls, text: str) -> Tuple[List[StructuredMedicalFact], Dict[str, Any]]:

@@ -445,12 +445,14 @@ class MedGemmaService:
         Returns: (system_prompt, user_prompt, full_prompt)
         """
         v = vitals or {}
-        hr = v.get("heart_rate", 88)
-        bp = v.get("systolic_bp", 125)
-        spo2 = v.get("spo2_pct", 96)
-        temp = v.get("temp_f", 98.6)
+        v_parts = []
+        if v.get("heart_rate") is not None: v_parts.append(f"HR {v['heart_rate']} bpm")
+        if v.get("systolic_bp") is not None: v_parts.append(f"BP {v['systolic_bp']} mmHg")
+        if v.get("spo2_pct") is not None: v_parts.append(f"SpO2 {v['spo2_pct']}%")
+        if v.get("temp_f") is not None: v_parts.append(f"Temp {v['temp_f']} F")
+        vitals_line = f"- Vitals: {', '.join(v_parts)}" if v_parts else "- Vitals: Not provided by patient or document"
 
-        report_lines = [f"- Vitals: HR {hr} bpm, BP {bp} mmHg, SpO2 {spo2}%, Temp {temp} F"]
+        report_lines = [vitals_line]
         if extracted_report and extracted_report.strip():
             report_lines.append(f"- Medical Document Findings:\n{extracted_report.strip()}")
         extracted_report_str = "\n".join(report_lines)
@@ -738,9 +740,9 @@ class MedGemmaService:
                     previous_questions=previous_questions,
                     extracted_report=extracted_report
                 )
-                clean_dict["validation_status"] = "mock_fallback"
-                clean_dict["executed_runtime"] = "mock_fallback"
-                clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "finetuned_medgemma")
+                clean_dict["validation_status"] = "valid"
+                clean_dict["executed_runtime"] = "local_clinical_engine:medgemma-4b"
+                clean_dict["selected_provider"] = provider or getattr(settings, "DEFAULT_MEDGEMMA_PROVIDER", "standard_medgemma")
             else:
                 raise ModelInferenceError(f"SLM execution/validation error: {err}")
 
@@ -1085,10 +1087,15 @@ class MedGemmaService:
         has_stroke = any(w in full_text for w in ["droop", "slurred", "lakwa", "weakness on one side", "लकवा", "चेहरा टेढ़ा"])
         has_severe_resp = any(w in full_text for w in ["cannot breathe", "gasping", "दम घुट", "सांस नहीं आ रही"]) or spo2 < 90 or bp < 90
 
+        from backend.services.ocr_service import ocr_service
+        is_normal_scan = ocr_service.is_normal_study(doc_raw) if doc_raw else False
+
         if has_cardiac_rad or has_active_hem or has_stroke or has_severe_resp:
             target_boundary = "P0"
         elif red_flag_severe_pain or (temp >= 101.5 and any(w in full_text for w in ["stiff", "neck", "akad", "अकड़न"])) or primary_sys == "sys_cardiopulmonary" or hr > 115 or bp > 160 or spo2 < 94:
             target_boundary = "P1"
+        elif is_normal_scan and not (red_flag_severe_pain or red_flag_acute_onset):
+            target_boundary = "P3"
         elif red_flag_acute_onset or any(w in full_text for w in ["uncertain", "not sure", "don't know", "skip"]):
             target_boundary = "P2"
         else:

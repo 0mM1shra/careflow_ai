@@ -20,7 +20,10 @@ EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b"
 )
 TITLED_NAME_PATTERN = re.compile(
-    r"\b(?:Dr\.|Doctor|Mr\.|Mister|Mrs\.|Ms\.|Shri|Smt\.|Prof\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b"
+    r"\b(?:Dr\.|Doctor|Mr\.|Mister|Mrs\.|Ms\.|Shri|Smt\.|Prof\.)\s+[A-Za-z\u0900-\u097F]+(?:\s+[A-Za-z\u0900-\u097F]+)?\b"
+)
+ID_RECORD_PATTERN = re.compile(
+    r"(?i)\b(?:uhid|mrn|patient\s*id|reg(?:istration)?\s*no|id\s*no)[:\s\-]*([A-Z0-9\-\/]{4,20})\b"
 )
 
 # Prohibited clinical diagnosis and prescription patterns for SLMs
@@ -83,22 +86,35 @@ class ClinicalSafetyService:
                 processed = AADHAAR_PATTERN.sub("[AADHAAR_REDACTED]", processed)
 
             # 3. Phone Numbers (+91 or 10-digit mobile)
-            # Guard against masking blood pressure ratios like "120/80" or dates like "10/05/2026"
             def _phone_sub(m):
                 match_str = m.group(0)
-                # Ensure it's not a vitals ratio or date
                 if "/" in match_str or "." in match_str:
                     return match_str
                 redactions["phone"] += 1
-                return "[PHONE_REDACTED]"
+                return "[REDACTED_ID]"
 
             processed = PHONE_PATTERN.sub(_phone_sub, processed)
 
-            # 4. Titled Names
+            # 4. Aadhaar Numbers
+            processed = processed.replace("[AADHAAR_REDACTED]", "[REDACTED_ID]")
+
+            # 5. Hospital IDs (UHID, MRN, Reg No)
+            id_matches = ID_RECORD_PATTERN.findall(processed)
+            if id_matches:
+                redactions["aadhaar"] = redactions.get("aadhaar", 0) + len(id_matches)
+                processed = ID_RECORD_PATTERN.sub("ID: [REDACTED_ID]", processed)
+
+            # 6. Titled Names
             names = TITLED_NAME_PATTERN.findall(processed)
             if names:
                 redactions["name"] = len(names)
-                processed = TITLED_NAME_PATTERN.sub("[NAME_REDACTED]", processed)
+                processed = TITLED_NAME_PATTERN.sub("[REDACTED_NAME]", processed)
+
+            # 7. Patient self-introductions in English, Hinglish, Hindi, and Report Headers
+            processed = re.sub(r"(?i)\b(my\s+name\s+is|i\s+am|this\s+is)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", r"\1 [REDACTED_NAME]", processed)
+            processed = re.sub(r"(?i)\b(mera\s+naam|mera\s+name)\s+[a-zA-Z\u0900-\u097F]+(?:\s+[a-zA-Z\u0900-\u097F]+){0,2}(\s+(?:hai|h))?\b", r"\1 [REDACTED_NAME]\2", processed)
+            processed = re.sub(r"(?i)\b(मेरा\s+नाम)\s+[a-zA-Z\u0900-\u097F]+(?:\s+[a-zA-Z\u0900-\u097F]+){0,2}(\s+है)?\b", r"\1 [REDACTED_NAME]\2", processed)
+            processed = re.sub(r"(?i)\b(patient(?:\s+name)?|name\s+of\s+patient|pt\s+name)\s*[:\-]\s*[A-Za-z\u0900-\u097F]+(?:\s+[A-Za-z\u0900-\u097F]+){0,2}\b", r"\1: [REDACTED_NAME]", processed)
 
             total_redactions = sum(redactions.values())
             has_pii = total_redactions > 0
@@ -250,3 +266,11 @@ mask_pii = safety_service.mask_pii
 validate_file_upload = safety_service.validate_file_upload
 sanitize_untrusted_text = safety_service.sanitize_untrusted_text
 validate_slm_triage_turn = safety_service.validate_slm_triage_turn
+
+
+def mask_patient_pii(text: Optional[str]) -> str:
+    """Masks all patient identifiers and self-introductions in text."""
+    if not text:
+        return ""
+    res = safety_service.mask_pii(text)
+    return res.masked_text

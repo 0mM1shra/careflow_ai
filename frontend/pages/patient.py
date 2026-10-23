@@ -293,6 +293,9 @@ if "uploaded_docs" not in st.session_state:
     st.session_state.uploaded_docs = []
 if "processed_audio_hashes" not in st.session_state:
     st.session_state.processed_audio_hashes = set()
+    st.session_state.last_processed_audio_hash = None
+if "last_processed_audio_hash" not in st.session_state:
+    st.session_state.last_processed_audio_hash = None
 if "dock_input_mode" not in st.session_state:
     st.session_state.dock_input_mode = "type"
 
@@ -305,6 +308,7 @@ def reset_intake_session():
     st.session_state.intake_mode = "chat"
     st.session_state.uploaded_docs = []
     st.session_state.processed_audio_hashes = set()
+    st.session_state.last_processed_audio_hash = None
     st.session_state.dock_input_mode = "type"
 
 # Sidebar: Hospital Info, Case Management, and Staff Access Code Gate
@@ -323,9 +327,6 @@ with st.sidebar:
     st.markdown("### 📋 Clinician Reviewer Portal")
     if st.button("Open Reviewer Dashboard 📋", type="primary", use_container_width=True, key="btn_patient_to_reviewer"):
         st.switch_page("pages/reviewer.py")
-
-    st.divider()
-    st.page_link("pages/model_showcase.py", label="🧠 Model Architecture", icon="🧠")
 
 # Wrap entire intake portal inside clean centered container
 with st.container():
@@ -501,27 +502,39 @@ with st.container():
                 incoming_audio = None
                 incoming_filename = "patient_speech.wav"
                 if audio_prompt is not None:
-                    incoming_audio = audio_prompt.getvalue()
+                    try:
+                        incoming_audio = audio_prompt.getvalue()
+                        if incoming_audio and incoming_audio.startswith(b"\x1a\x45\xdf\xa3"):
+                            incoming_filename = "patient_speech.webm"
+                        else:
+                            incoming_filename = "patient_speech.wav"
+                    except Exception:
+                        incoming_audio = None
                 elif audio_file_upl is not None:
-                    incoming_audio = audio_file_upl.getvalue()
-                    incoming_filename = audio_file_upl.name
+                    try:
+                        incoming_audio = audio_file_upl.getvalue()
+                        incoming_filename = audio_file_upl.name
+                    except Exception:
+                        incoming_audio = None
 
-                if incoming_audio is not None:
+                if incoming_audio is not None and len(incoming_audio) > 80:
                     audio_bytes = incoming_audio
                     audio_hash = hashlib.sha256(audio_bytes).hexdigest()
-                    if audio_hash not in st.session_state.processed_audio_hashes:
+                    if (audio_hash not in st.session_state.processed_audio_hashes and 
+                        audio_hash != st.session_state.get("last_processed_audio_hash")):
+                        st.session_state.last_processed_audio_hash = audio_hash
                         st.session_state.processed_audio_hashes.add(audio_hash)
-                        with st.spinner("Transcribing your voice recording..."):
+                        with st.spinner("CareFlow is transcribing your speech..."):
                             try:
                                 trans_res = api_client.transcribe_audio(
                                     file_bytes=audio_bytes,
                                     filename=incoming_filename,
                                     language=asr_lang
                                 )
-                                transcript = trans_res.get("transcript", "").strip()
-                                conf = trans_res.get("confidence")
+                                transcript = trans_res.get("transcript", "").strip() if trans_res else ""
+                                conf = trans_res.get("confidence") if trans_res else None
                                 if transcript:
-                                    st.info(f"🎤 Transcribed: &ldquo;{transcript}&rdquo;")
+                                    st.success(f"🎤 Transcribed: &ldquo;{transcript}&rdquo; — Submitting...")
                                     handle_patient_input(
                                         text_content=transcript,
                                         source_type="voice",
@@ -529,9 +542,9 @@ with st.container():
                                         conf=conf
                                     )
                                 else:
-                                    st.warning("No speech detected. Please speak clearly or type below.")
+                                    st.warning("No speech clearly detected. Please speak closer to the microphone or type below.")
                             except Exception as e:
-                                st.error(f"Voice transcription error: {e}")
+                                st.warning("Voice processing was unclear or timed out. Please type your message or try recording again.")
 
             elif selected_mode == "📎 Attach Report":
                 st.markdown("""

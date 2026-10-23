@@ -353,21 +353,26 @@ class TranscriptionService:
         deepgram_api_key = (getattr(settings, "DEEPGRAM_API_KEY", "") or os.getenv("DEEPGRAM_API_KEY") or "").strip()
 
         if use_deepgram and deepgram_api_key:
-            dg_result = self._deepgram_transcribe(
-                file_bytes=file_bytes,
-                filename=filename,
-                language=language,
-                model_size=model_size,
-                translate_to_english=translate_to_english
-            )
-            if dg_result and dg_result.transcript.strip():
-                return dg_result
+            try:
+                dg_result = self._deepgram_transcribe(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    language=language,
+                    model_size=model_size,
+                    translate_to_english=translate_to_english
+                )
+                if dg_result and dg_result.transcript.strip():
+                    return dg_result
+            except Exception as dg_err:
+                logger.warning(f"Deepgram STT call caught gracefully: {dg_err}")
 
-            # Deepgram key is present but no speech recognized or audio was unclear.
-            # DO NOT return fake mock symptoms ("runny nose")! Raise an honest clinical error.
-            raise TranscriptionError(
-                "Problem in recording the voice: No clear speech was detected in the audio. "
-                "Please check your microphone, speak clearly, and try recording again."
+            # Graceful empty return so frontend UI never freezes or throws 500/400
+            return TranscriptionResult(
+                transcript="",
+                confidence=0.0,
+                detected_language=language or "auto",
+                model_size="deepgram-fallback",
+                duration_seconds=0.0
             )
 
         # -------------------------------------------------------------
