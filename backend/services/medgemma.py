@@ -24,6 +24,8 @@ class TriageTurnSchema(BaseModel):
         "sys_dermatological",
         "sys_systemic",
         "sys_eent",
+        "sys_general",
+        "general",
         "cardiopulmonary",
         "neurological",
         "gastrointestinal",
@@ -177,7 +179,7 @@ class MedGemmaService:
     def is_ollama_available(self, model_name: Optional[str] = None) -> bool:
         """Checks if local Ollama service is reachable and has the requested model registered."""
         try:
-            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=0.6)
+            resp = requests.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=3.0)
             if resp.status_code == 200:
                 models = [m.get("name", "") for m in resp.json().get("models", [])]
                 target = model_name or settings.OLLAMA_MODEL
@@ -246,7 +248,7 @@ class MedGemmaService:
                 "keep_alive": "30m",
             }
         }
-        timeout = settings.MODEL_TIMEOUT_SECONDS
+        timeout = 30.0  # Explicit 30-second production timeout for local Ollama SLM
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             if resp.status_code == 200:
@@ -499,9 +501,10 @@ class MedGemmaService:
             schema_json = json.dumps(TriageTurnSchema.model_json_schema(), indent=2)
             has_report = bool(extracted_report and extracted_report.strip())
             report_directive = (
-                "\nSPECIAL LAB REPORT DIRECTIVE: A patient medical report/lab summary is present in <extracted_report>. "
-                "You MUST inspect any abnormal lab values, critical biomarkers, or abnormal vitals in <extracted_report>, "
-                "and ensure your follow-up question specifically addresses those abnormal findings and related clinical risks.\n"
+                "\nCRITICAL: If the <extracted_report> shows normal, unremarkable, or healthy results AND the patient has not reported any acute symptoms, "
+                "DO NOT ask generic emergency questions (like chest pain or shortness of breath). "
+                "Instead, generate a next_question_en that acknowledges the normal report and simply asks how you can help them today or if they have any other specific symptoms. "
+                "You are explicitly permitted and encouraged to set target_triage_boundary to 'P3' and primary_system_flag to 'sys_general' if the report is entirely normal.\n"
                 if has_report else ""
             )
             system_prompt = (
@@ -509,24 +512,27 @@ class MedGemmaService:
                 "Analyze the patient intake and output strict JSON adhering exactly to the following Pydantic schema:\n"
                 f"{schema_json}\n\n"
                 "CLINICAL INTAKE PROTOCOL:\n"
-                "1. Thoroughly evaluate <conversation_history>, <extracted_report> (uploaded OCR lab values/findings), and <vitals>.\n"
-                "2. Systematically track <known_clinical_facts> across 4 required clinical dimensions:\n"
-                "   - Dimension 1: Onset & Duration (when symptoms started, sudden vs gradual timeline)\n"
-                "   - Dimension 2: Severity & Progression (scale 1-10, worsening, functional impairment, speech dyspnea)\n"
-                "   - Dimension 3: Anatomical/Organ-Specific Red Flags (radiating chest pain, breathing collapse, neurological deficits, bleeding, localized signs)\n"
-                "   - Dimension 4: Lab Report Abnormalities / Medical History (prior chronic conditions, medications, abnormal biomarkers in uploaded reports)\n"
-                "3. NEVER repeat or rephrase any question already present in <previous_questions>.\n"
-                "4. Generate the single highest-yield 'next_question_en' specifically targeting the next uncollected clinical dimension.\n"
+                "1. Thoroughly evaluate <conversation_history>, <extracted_report> (uploaded diagnostic scans or lab values), and <vitals>.\n"
                 f"{report_directive}"
+                "2. Extract the exact 'primary_system_flag', 'red_flag_severe_pain' (true/false), 'red_flag_acute_onset' (true/false), and 'target_triage_boundary' ('P0', 'P1', 'P2', 'P3') synthesizing both the conversation and diagnostic report.\n"
+                "3. If the report has abnormal findings, generate a question specifically targeting those abnormal biomarkers/risks. If normal, acknowledge the normal result and ask how to help.\n"
+                "4. NEVER repeat or rephrase any question already present in <already_asked_questions>.\n"
                 "5. Ensure 'next_question_hi' is natural, idiomatic Hindi.\n"
                 "6. Output ONLY the raw JSON object conforming to the schema with no markdown formatting or commentary."
             )
         else:
             # Exact 6-field system prompt preserving fine-tuned training contract
+            report_directive = (
+                " CRITICAL: If the <extracted_report> shows normal, unremarkable, or healthy results AND the patient has not reported any acute symptoms, "
+                "DO NOT ask generic emergency questions (like chest pain or shortness of breath). "
+                "Instead, generate a next_question_en that acknowledges the normal report and simply asks how you can help them today or if they have any other specific symptoms. "
+                "Set target_triage_boundary to 'P3' and primary_system_flag to 'sys_general' if the report is entirely normal."
+                if (extracted_report and extracted_report.strip()) else ""
+            )
             system_prompt = (
                 "You are CareFlow AI. Classify the affected system, extract red flags, and output ONE bilingual follow-up question in strict JSON with keys: "
                 "primary_system_flag, red_flag_severe_pain, red_flag_acute_onset, target_triage_boundary, next_question_en, next_question_hi.\n"
-                "GUIDELINES: Do not ask about onset or duration if already reported. Tailor questions specifically to the reported symptoms. "
+                f"GUIDELINES: Do not ask about onset or duration if already reported. Tailor questions specifically to the reported symptoms.{report_directive} "
                 "Ensure next_question_hi is natural, idiomatic Hindi."
             )
 
@@ -628,7 +634,7 @@ class MedGemmaService:
         valid_systems = [
             "sys_cardiopulmonary", "sys_neurological", "sys_gastrointestinal",
             "sys_urogenital", "sys_musculoskeletal", "sys_dermatological",
-            "sys_systemic", "sys_eent", "cardiopulmonary", "neurological",
+            "sys_systemic", "sys_eent", "sys_general", "general", "cardiopulmonary", "neurological",
             "gastrointestinal", "musculoskeletal", "dermatological",
             "renal_urological", "systemic", "other"
         ]
@@ -1096,6 +1102,7 @@ class MedGemmaService:
             target_boundary = "P1"
         elif is_normal_scan and not (red_flag_severe_pain or red_flag_acute_onset):
             target_boundary = "P3"
+            primary_sys = "sys_general"
         elif red_flag_acute_onset or any(w in full_text for w in ["uncertain", "not sure", "don't know", "skip"]):
             target_boundary = "P2"
         else:
