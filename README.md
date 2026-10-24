@@ -466,7 +466,6 @@ curl -X POST "http://127.0.0.1:8000/ai-pipeline/run" \
 
 ## 10. Contributors & License
 
-CareFlow AI was engineered for the **Inter IIT Tech Meet / General Championship**.
 
 - **Repository**: [https://github.com/0mM1shra/careflow_ai](https://github.com/0mM1shra/careflow_ai)
 - **Author**: Om Mishra ([@0mM1shra](https://github.com/0mM1shra))
